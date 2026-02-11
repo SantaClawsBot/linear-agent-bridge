@@ -1,0 +1,51 @@
+{
+  "name": "linear-agent-bridge",
+  "version": "0.1.2",
+  "description": "Linear agent webhook integration for OpenClaw",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "openclaw.plugin.json",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "openclaw",
+    "linear",
+    "agent",
+    "webhook",
+    "plugin"
+  ],
+  "author": "tokezooo",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tokezooo/linear-agent-bridge"
+  },
+  "bugs": {
+    "url": "https://github.com/tokezooo/linear-agent-bridge/issues"
+  },
+  "homepage": "https://github.com/tokezooo/linear-agent-bridge#readme",
+  "openclaw": {
+    "extensions": [
+      "./dist/index.js"
+    ]
+  },
+  "peerDependencies": {
+    "openclaw": "*"
+  },
+  "peerDependenciesMeta": {
+    "openclaw": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.33",
+    "typescript": "^5.0.0"
+  }
+}

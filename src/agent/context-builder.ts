@@ -1,0 +1,130 @@
+import { buildMessage, type MessageParams } from "../webhook/message-builder.js";
+
+export interface EnrichedMessageParams extends MessageParams {
+  apiBaseUrl: string;
+  apiToken: string;
+  issueId: string;
+  teamId: string;
+}
+
+export function buildEnrichedMessage(params: EnrichedMessageParams): string {
+  const baseMessage = buildMessage(params);
+
+  const linearTools = `
+## Linear API — Available Operations
+
+You can perform Linear operations by making HTTP POST requests during your execution.
+All requests go to a single endpoint. Use the "action" field in the JSON body to select the operation.
+
+**Endpoint:** POST ${params.apiBaseUrl}
+**Authorization:** Bearer ${params.apiToken}
+**Content-Type:** application/json
+
+Every request body MUST include an "action" field. Example:
+\`\`\`json
+{ "action": "query/viewer" }
+\`\`\`
+
+**Current context (used as defaults when fields are omitted):**
+- Issue: ${params.id} (ID: ${params.issueId})
+- Session: ${params.session}
+- Team ID: ${params.teamId}
+
+---
+
+### Issue Management
+
+**action: "issue/create"** — Create a new issue
+{ action: "issue/create", teamId?, title, description?, priority? (0-4), labelIds?: string[], assigneeId?, parentId?, stateId? }
+
+**action: "issue/update"** — Update issue fields
+{ action: "issue/update", issueId?, title?, description?, stateId?, priority?, labelIds?, assigneeId?, delegateId? }
+
+**action: "issue/close"** — Close an issue (moves to "completed" state)
+{ action: "issue/close", issueId? }
+
+**action: "issue/create-sub-issue"** — Create a child issue under the current issue
+{ action: "issue/create-sub-issue", title, description?, priority?, labelIds?, assigneeId? }
+
+**action: "issue/link"** — Link two issues together
+{ action: "issue/link", issueId?, relatedIssueId, type: "blocks" | "blocked_by" | "related" | "duplicate" }
+
+---
+
+### Communication — Agent Activities
+
+Post activities to the Linear session to communicate with users.
+
+**action: "activity/thought"** — Share your reasoning (shown as internal thought)
+{ action: "activity/thought", body: "markdown text", ephemeral?: boolean }
+
+**action: "activity/action"** — Show a tool call or operation
+{ action: "activity/action", activityAction: "verb", parameter?: "subject", result?: "markdown result" }
+
+**action: "activity/elicitation"** — Ask the user a question
+{ action: "activity/elicitation", body: "question", signal?: "select", signalMeta?: { options: [{ value: "..." }] } }
+When using signal: "select", present options for the user to choose from.
+
+**action: "activity/response"** — Post a final response (marks session as complete)
+{ action: "activity/response", body: "markdown text" }
+
+**action: "activity/error"** — Report an error
+{ action: "activity/error", body: "error description" }
+
+---
+
+### Session Management
+
+**action: "session/plan"** — Update session progress checklist
+{ action: "session/plan", plan: [{ content: "Step description", status: "pending" | "inProgress" | "completed" | "canceled" }] }
+Note: replaces the entire plan each time. Include all steps.
+
+**action: "session/create-on-issue"** — Proactively create a session on another issue
+{ action: "session/create-on-issue", issueId }
+
+**action: "session/create-on-comment"** — Create session on a comment
+{ action: "session/create-on-comment", commentId }
+
+**action: "session/external-url"** — Set an external URL on the session
+{ action: "session/external-url", url, label }
+
+---
+
+### Delegation
+
+**action: "delegate/assign"** — Delegate issue to another agent or user
+{ action: "delegate/assign", issueId?, delegateId }
+
+**action: "delegate/reassign"** — Change issue assignee
+{ action: "delegate/reassign", issueId?, assigneeId }
+
+---
+
+### Queries
+
+**action: "query/issue"** — Get full issue details (labels, state, assignee, comments, relations, children)
+{ action: "query/issue", issueId? }
+
+**action: "query/team"** — Get team info (workflow states, labels, members)
+{ action: "query/team", teamId? }
+
+**action: "query/repo-suggestions"** — Get AI-ranked repository suggestions
+{ action: "query/repo-suggestions", issueId?, candidateRepositories: [{ hostname, repositoryFullName }] }
+
+**action: "query/viewer"** — Get the current app identity
+{ action: "query/viewer" }
+
+---
+
+### Tips
+
+- Use @mentions by including plain Linear URLs: https://linear.app/TEAM/profiles/USERNAME
+- Reference issues via URLs: https://linear.app/TEAM/issue/IDENTIFIER — they render as mentions
+- Post thoughts and actions to show progress during long-running tasks
+- Update the session plan as you complete steps
+- Use elicitation with the "select" signal to present options to the user
+- Post a response activity when your work is complete
+`;
+
+  return [baseMessage, linearTools].join("\n\n");
+}
