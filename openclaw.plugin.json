@@ -18,6 +18,22 @@
         "type": "string",
         "description": "Linear OAuth token for posting activities and updating issues"
       },
+      "linearOauthClientId": {
+        "type": "string",
+        "description": "Linear OAuth client ID for code exchange/refresh"
+      },
+      "linearOauthClientSecret": {
+        "type": "string",
+        "description": "Linear OAuth client secret for code exchange/refresh"
+      },
+      "linearOauthRedirectUri": {
+        "type": "string",
+        "description": "Redirect URI configured in Linear app settings"
+      },
+      "linearTokenStorePath": {
+        "type": "string",
+        "description": "Workspace-local path for persisted Linear OAuth tokens"
+      },
       "notifyChannel": {
         "type": "string",
         "description": "Optional channel to deliver agent responses (e.g., 'discord')"
@@ -73,6 +89,13 @@
   "uiHints": {
     "linearWebhookSecret": { "label": "Webhook secret", "sensitive": true },
     "linearApiKey": { "label": "API key / OAuth token", "sensitive": true },
+    "linearOauthClientId": { "label": "OAuth client ID", "sensitive": true },
+    "linearOauthClientSecret": { "label": "OAuth client secret", "sensitive": true },
+    "linearOauthRedirectUri": { "label": "OAuth redirect URI" },
+    "linearTokenStorePath": {
+      "label": "OAuth token store path",
+      "placeholder": "/home/ubuntu/.openclaw/workspace/.pi/linear-oauth.json"
+    },
     "delegateOnCreate": { "label": "Auto delegate" },
     "startOnCreate": { "label": "Move to started" },
     "externalUrlBase": {

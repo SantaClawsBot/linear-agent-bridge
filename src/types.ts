@@ -23,6 +23,10 @@ export interface PluginConfig {
   devAgentId?: string;
   linearWebhookSecret?: string;
   linearApiKey?: string;
+  linearOauthClientId?: string;
+  linearOauthClientSecret?: string;
+  linearOauthRedirectUri?: string;
+  linearTokenStorePath?: string;
   notifyChannel?: string;
   notifyTo?: string;
   notifyAccountId?: string;

@@ -134,7 +134,17 @@ Key scopes:
 | `app:assignable` | Allow delegation to the agent |
 | `app:mentionable` | Allow @mentioning the agent |
 
-### 3. Get the Webhook Signing Secret
+### 3. Token Exchange (low human-in-the-loop mode)
+
+After the user authorizes your app, Linear redirects with `?code=...`.
+This plugin can accept the code, exchange it, and persist tokens automatically:
+
+- `GET /plugins/linear/oauth/callback?code=...` (browser redirect target)
+- `POST /plugins/linear/oauth/exchange` with JSON `{ "code": "..." }`
+
+The token set is stored in `linearTokenStorePath` (default `~/.openclaw/workspace/.pi/linear-oauth.json`) with restrictive file permissions, and refresh is attempted automatically when the access token expires.
+
+### 4. Get the Webhook Signing Secret
 
 In your Linear application settings, copy the **Webhook signing secret**. This is used for HMAC-SHA256 signature verification of incoming webhooks.
 
@@ -146,8 +156,12 @@ Configure the plugin in your OpenClaw config under the plugin's section. All opt
 
 | Option | Type | Description |
 |--------|------|-------------|
-| `linearApiKey` | `string` | Linear OAuth token (from the OAuth flow above) |
 | `linearWebhookSecret` | `string` | Webhook signing secret for HMAC verification |
+
+Authentication requires **one** of these modes:
+
+- Static token mode: set `linearApiKey`
+- OAuth automation mode: set `linearOauthClientId`, `linearOauthClientSecret`, `linearOauthRedirectUri`
 
 ### Recommended
 
@@ -176,6 +190,7 @@ Configure the plugin in your OpenClaw config under the plugin's section. All opt
 |--------|------|---------|-------------|
 | `enableAgentApi` | `boolean` | `true` | Enable the API proxy that agents call during execution |
 | `apiBaseUrl` | `string` | auto-detected | Override the auto-detected base URL for agent API callbacks |
+| `linearTokenStorePath` | `string` | `~/.openclaw/workspace/.pi/linear-oauth.json` | Workspace-local OAuth token store path (written with `0600`) |
 
 ### External URLs
 
@@ -196,8 +211,11 @@ Configure the plugin in your OpenClaw config under the plugin's section. All opt
 
 ```json
 {
-  "linearApiKey": "lin_oauth_...",
   "linearWebhookSecret": "whsec_...",
+  "linearOauthClientId": "...",
+  "linearOauthClientSecret": "...",
+  "linearOauthRedirectUri": "https://your-host/plugins/linear/oauth/callback",
+  "linearTokenStorePath": "/home/ubuntu/.openclaw/workspace/.pi/linear-oauth.json",
   "devAgentId": "dev",
   "defaultDir": "/home/projects/main-repo",
   "repoByTeam": {
