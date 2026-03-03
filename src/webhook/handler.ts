@@ -527,7 +527,7 @@ async function isExplicitlyAddressed(input: {
       }
       return { ok: false, reason: `thread-owned-by-${ownerHandle}` };
     }
-    return { ok: true, reason: "thread-reply" };
+    return { ok: false, reason: "thread-owner-unknown" };
   }
 
   return { ok: false, reason: "not-addressed" };
