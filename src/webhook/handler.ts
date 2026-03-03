@@ -194,6 +194,7 @@ async function handleAgentEvent(
     }
   }
   const context = resolveContext(data);
+  const compactMessage = action === "prompted";
   const team = resolveKey(issue?.team);
   const proj = resolveKey(issue?.project);
   const repo = resolveRepo(cfg, team, proj);
@@ -215,7 +216,7 @@ async function handleAgentEvent(
   // Mark in-flight immediately (before any await) to prevent races.
   if (session) inflightSessions.set(session, Date.now());
 
-  const key = normalizeKey(session || id || title || randomUUID());
+  const key = normalizeKey(session || id || randomUUID());
   const sessionKey = `agent:${agent}:linear:${key}`;
   const idem = delivery ?? randomUUID();
   const signal = resolveSignal(data);
@@ -291,6 +292,7 @@ async function handleAgentEvent(
       repo,
       session,
       context,
+      compact: compactMessage,
       apiBaseUrl,
       apiToken,
       issueId,
@@ -309,55 +311,88 @@ async function handleAgentEvent(
       repo,
       session,
       context,
+      compact: compactMessage,
     });
   }
 
   // Run the agent and post response
   try {
     const call = await loadCallGateway(api);
-    await call({
-      method: "agent",
-      params: {
-        message,
-        agentId: agent,
-        sessionKey,
-        label,
-        idempotencyKey: idem,
-        deliver,
-        channel: cfg.notifyChannel,
-        to: cfg.notifyTo,
-        accountId: cfg.notifyAccountId,
-      },
-      expectFinal: true,
-      timeoutMs: AGENT_TIMEOUT_MS,
-    })
-      .then((result) => {
-        // Cleanup
-        if (session) inflightSessions.delete(session);
-        if (apiToken) revokeSessionToken(apiToken);
-        if (session) cleanupSession(session);
 
-        const text = buildAgentResponse(result);
-        // Only post if agent hasn't already posted a response via API
-        if (session && hasPostedResponse(session)) {
-          clearResponseFlag(session);
+    const runAgent = (key: string, idemKey: string) =>
+      call({
+        method: "agent",
+        params: {
+          message,
+          agentId: agent,
+          sessionKey: key,
+          label,
+          idempotencyKey: idemKey,
+          deliver,
+          channel: cfg.notifyChannel,
+          to: cfg.notifyTo,
+          accountId: cfg.notifyAccountId,
+        },
+        expectFinal: true,
+        timeoutMs: AGENT_TIMEOUT_MS,
+      });
+
+    const handleSuccess = (result: unknown) => {
+      if (session) inflightSessions.delete(session);
+      if (apiToken) revokeSessionToken(apiToken);
+      if (session) cleanupSession(session);
+
+      const text = buildAgentResponse(result);
+      if (session && hasPostedResponse(session)) {
+        clearResponseFlag(session);
+        return;
+      }
+      if (!text || text === "Agent completed with no reply.") return;
+      postActivity(api, cfg, session, { type: "response", body: text }).catch(() => {});
+    };
+
+    try {
+      const result = await runAgent(sessionKey, idem);
+      handleSuccess(result);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const isAgentSessionMismatch =
+        msg.includes("does not match session key agent") ||
+        msg.includes("invalid agent params") && msg.includes("session key agent");
+
+      if (isAgentSessionMismatch) {
+        const freshSessionKey = `agent:${agent}:linear:${normalizeKey(randomUUID())}`;
+        const retryIdem = randomUUID();
+        api.logger.warn?.(`linear agent/session mismatch detected; retrying with fresh session key (${freshSessionKey})`);
+        try {
+          const retryResult = await runAgent(freshSessionKey, retryIdem);
+          handleSuccess(retryResult);
+          return;
+        } catch (retryErr) {
+          const retryMsg = retryErr instanceof Error ? retryErr.message : String(retryErr);
+          if (session) inflightSessions.delete(session);
+          if (apiToken) revokeSessionToken(apiToken);
+          if (session) cleanupSession(session);
+          if (session) clearResponseFlag(session);
+          api.logger.warn?.(`linear agent retry failed: ${retryMsg}`);
+          postActivity(api, cfg, session, {
+            type: "error",
+            body: `Agent run failed: ${retryMsg}`,
+          }).catch(() => {});
           return;
         }
-        if (!text || text === "Agent completed with no reply.") return;
-        postActivity(api, cfg, session, { type: "response", body: text }).catch(() => {});
-      })
-      .catch((err) => {
-        if (session) inflightSessions.delete(session);
-        if (apiToken) revokeSessionToken(apiToken);
-        if (session) cleanupSession(session);
-        if (session) clearResponseFlag(session);
-        const msg = err instanceof Error ? err.message : String(err);
-        api.logger.warn?.(`linear agent run failed: ${msg}`);
-        postActivity(api, cfg, session, {
-          type: "error",
-          body: `Agent run failed: ${msg}`,
-        }).catch(() => {});
-      });
+      }
+
+      if (session) inflightSessions.delete(session);
+      if (apiToken) revokeSessionToken(apiToken);
+      if (session) cleanupSession(session);
+      if (session) clearResponseFlag(session);
+      api.logger.warn?.(`linear agent run failed: ${msg}`);
+      postActivity(api, cfg, session, {
+        type: "error",
+        body: `Agent run failed: ${msg}`,
+      }).catch(() => {});
+    }
   } catch (err) {
     if (session) inflightSessions.delete(session);
     if (apiToken) revokeSessionToken(apiToken);

@@ -9,6 +9,7 @@ export interface EnrichedMessageParams extends MessageParams {
 
 export function buildEnrichedMessage(params: EnrichedMessageParams): string {
   const baseMessage = buildMessage(params);
+  if (params.compact) return baseMessage;
 
   const linearTools = `
 ## Linear API — Available Operations
