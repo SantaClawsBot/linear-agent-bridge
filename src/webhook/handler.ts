@@ -491,6 +491,12 @@ async function isExplicitlyAddressed(input: {
     if (viewerId && delegateId && delegateId === viewerId) {
       return { ok: true, reason: "delegated-to-app" };
     }
+    // In strict mode, also allow explicit mention on create events.
+    const handle = (mentionHandle ?? "").trim().toLowerCase().replace(/^@/, "");
+    const createdMentions = extractMentionHandles((prompt ?? "").toLowerCase());
+    if (handle && createdMentions.has(handle)) {
+      return { ok: true, reason: "explicit-mention-on-create" };
+    }
     return { ok: false, reason: "created-without-delegation" };
   }
 
