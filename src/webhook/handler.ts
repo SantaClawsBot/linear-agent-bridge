@@ -10,7 +10,7 @@ import type {
   ActivityOptions,
 } from "../types.js";
 import { normalizeCfg } from "../config.js";
-import { callLinear } from "../linear-client.js";
+import { callLinear, resolveViewer } from "../linear-client.js";
 import { ACTIVITY_MUTATION, SESSION_UPDATE_MUTATION } from "../graphql/mutations.js";
 import {
   readBody,
@@ -176,6 +176,7 @@ async function handleAgentEvent(
     api.logger.info?.("linear agent event ignored");
     return;
   }
+  const kind = readString(data.type as string) ?? "";
   const issue = resolveIssue(data);
   const issueId = readString(issue?.id) ?? "";
   const id = readString(issue?.identifier) ?? "";
@@ -193,6 +194,25 @@ async function handleAgentEvent(
       return;
     }
   }
+
+  if (cfg.strictAddressing === true) {
+    const viewerId = await resolveViewer(api, cfg);
+    const addressed = await isExplicitlyAddressed({
+      api,
+      cfg,
+      kind,
+      action,
+      data,
+      prompt,
+      viewerId,
+      mentionHandle: cfg.mentionHandle,
+    });
+    if (!addressed.ok) {
+      api.logger.info?.(`linear event ignored (strictAddressing: ${addressed.reason})`);
+      return;
+    }
+  }
+
   const context = resolveContext(data);
   const compactMessage = action === "prompted";
   const team = resolveKey(issue?.team);
@@ -449,6 +469,116 @@ async function updateSessionExternalUrl(
   const root = readObject(result.data!.agentSessionUpdate);
   if (root && root.success === true) return;
   api.logger.warn?.("linear agentSessionUpdate failed");
+}
+
+async function isExplicitlyAddressed(input: {
+  api: OpenClawPluginApi;
+  cfg: PluginConfig;
+  kind: string;
+  action: string;
+  data: Record<string, unknown>;
+  prompt: string;
+  viewerId: string;
+  mentionHandle?: string;
+}): Promise<{ ok: boolean; reason: string }> {
+  const { api, cfg, kind, action, data, prompt, viewerId, mentionHandle } = input;
+
+  // Session creation events are allowed only when delegated to this app user.
+  if (action === "created") {
+    const issue = resolveIssue(data);
+    const delegate = readObject(issue?.delegate);
+    const delegateId = readString(delegate?.id) ?? "";
+    if (viewerId && delegateId && delegateId === viewerId) {
+      return { ok: true, reason: "delegated-to-app" };
+    }
+    return { ok: false, reason: "created-without-delegation" };
+  }
+
+  const comment = readObject(data.comment);
+  const bodyRaw = `${prompt}\n${readString(comment?.body) ?? ""}`;
+  const body = bodyRaw.toLowerCase();
+  const handle = (mentionHandle ?? "").trim().toLowerCase().replace(/^@/, "");
+  const mentionedHandles = extractMentionHandles(body);
+
+  // If current comment mentions handles and not ours, skip (targeting someone else).
+  if (mentionedHandles.size > 0 && handle && !mentionedHandles.has(handle)) {
+    return { ok: false, reason: "mentioned-other-bot" };
+  }
+
+  // Explicit mention of this app always allows processing.
+  if (handle && mentionedHandles.has(handle)) {
+    return { ok: true, reason: "explicit-mention" };
+  }
+
+  // For thread replies, lock on root thread owner mention when present.
+  const parentId = readString(comment?.parentId) ?? readString(data.parentId as string) ?? "";
+  const commentId = readString(comment?.id) ?? readString(data.commentId as string) ?? "";
+  if (kind === "Comment" && parentId) {
+    const ownerHandle = await resolveThreadOwnerHandle(api, cfg, commentId);
+    if (ownerHandle) {
+      if (handle && ownerHandle === handle) {
+        return { ok: true, reason: "thread-owned-by-us" };
+      }
+      return { ok: false, reason: `thread-owned-by-${ownerHandle}` };
+    }
+    return { ok: true, reason: "thread-reply" };
+  }
+
+  return { ok: false, reason: "not-addressed" };
+}
+
+function extractMentionHandles(text: string): Set<string> {
+  const matches = Array.from((text ?? "").matchAll(/@([a-z0-9._-]+)/gi));
+  return new Set(matches.map((m) => (m[1] ?? "").toLowerCase()).filter(Boolean));
+}
+
+function pickBotLikeHandle(handles: Set<string>): string {
+  for (const h of handles) {
+    if (h.includes("openclaw") || h.endsWith("-bot") || h.endsWith("bot")) return h;
+  }
+  return "";
+}
+
+async function resolveThreadOwnerHandle(
+  api: OpenClawPluginApi,
+  cfg: PluginConfig,
+  commentId: string,
+): Promise<string> {
+  if (!commentId) return "";
+  const { COMMENT_THREAD_NODE_QUERY } = await import("../graphql/queries.js");
+
+  let currentId = commentId;
+  let safety = 0;
+  while (currentId && safety < 12) {
+    safety += 1;
+    const result = await callLinear(api, cfg, "commentThreadNode", {
+      query: COMMENT_THREAD_NODE_QUERY,
+      variables: { id: currentId },
+    });
+    if (!result.ok) return "";
+    const node = readObject(result.data?.comment);
+    if (!node) return "";
+
+    const parentId = readString(node.parentId) ?? "";
+    const body = readString(node.body) ?? "";
+
+    if (!parentId) {
+      const handles = extractMentionHandles(body.toLowerCase());
+      return pickBotLikeHandle(handles);
+    }
+
+    const parent = readObject(node.parent);
+    const parentObjId = readString(parent?.id) ?? "";
+    const parentObjParentId = readString(parent?.parentId) ?? "";
+    if (parent && parentObjId && !parentObjParentId) {
+      const rootBody = readString(parent.body) ?? "";
+      const handles = extractMentionHandles(rootBody.toLowerCase());
+      return pickBotLikeHandle(handles);
+    }
+
+    currentId = parentObjId || parentId;
+  }
+  return "";
 }
 
 function normalizePayload(
