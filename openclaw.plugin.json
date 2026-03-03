@@ -83,6 +83,14 @@
       "apiBaseUrl": {
         "type": "string",
         "description": "Override auto-detected base URL for agent API calls"
+      },
+      "strictAddressing": {
+        "type": "boolean",
+        "description": "Process only explicitly addressed events (mentions/delegation/thread replies)"
+      },
+      "mentionHandle": {
+        "type": "string",
+        "description": "App mention handle used for strict addressing (e.g. personal-openclaw)"
       }
     }
   },
@@ -110,6 +118,11 @@
     "apiBaseUrl": {
       "label": "API base URL override",
       "placeholder": "https://your-hostname.ts.net"
+    },
+    "strictAddressing": { "label": "Strict addressing mode" },
+    "mentionHandle": {
+      "label": "Mention handle",
+      "placeholder": "personal-openclaw"
     }
   }
 }
