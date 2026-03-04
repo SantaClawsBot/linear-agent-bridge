@@ -192,6 +192,13 @@ Authentication requires **one** of these modes:
 | `apiBaseUrl` | `string` | auto-detected | Override the auto-detected base URL for agent API callbacks |
 | `linearTokenStorePath` | `string` | `~/.openclaw/workspace/.pi/linear-oauth.json` | Workspace-local OAuth token store path (written with `0600`) |
 
+### Addressing Controls
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `strictAddressing` | `boolean` | `false` | Process only explicitly addressed events (mentions, delegation, thread replies) |
+| `mentionHandle` | `string` | — | App mention handle used in strict mode (example: `personal-openclaw`) |
+
 ### External URLs
 
 | Option | Type | Description |
@@ -224,6 +231,8 @@ Authentication requires **one** of these modes:
   },
   "delegateOnCreate": true,
   "startOnCreate": true,
+  "strictAddressing": true,
+  "mentionHandle": "personal-openclaw",
   "enableAgentApi": true,
   "externalUrlBase": "https://dash.example.com/sessions/{session}"
 }
