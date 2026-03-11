@@ -90,6 +90,21 @@ export const COMMENT_SESSION_QUERY = `
   }
 `;
 
+export const COMMENT_THREAD_NODE_QUERY = `
+  query CommentThreadNode($id: String!) {
+    comment(id: $id) {
+      id
+      body
+      parentId
+      parent {
+        id
+        body
+        parentId
+      }
+    }
+  }
+`;
+
 export const ISSUE_SESSION_QUERY = `
   query IssueSession($id: String!) {
     issue(id: $id) {

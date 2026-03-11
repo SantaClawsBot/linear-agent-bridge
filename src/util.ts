@@ -80,6 +80,57 @@ export function sendJson(
   res.end(JSON.stringify(data));
 }
 
+
+export function applyCorsHeaders(input: {
+  req: IncomingMessage;
+  res: ServerResponse;
+  allowedOrigins?: string[];
+  allowCredentials?: boolean;
+}): { allowed: boolean } {
+  const { req, res, allowedOrigins, allowCredentials } = input;
+  const origin = readHeader(req, "origin");
+  const normalized = (allowedOrigins ?? []).map((v) => v.trim()).filter(Boolean);
+  const allowAll = normalized.includes("*");
+  const allowOrigin = allowAll
+    ? "*"
+    : origin && normalized.includes(origin)
+      ? origin
+      : undefined;
+
+  if (allowOrigin) {
+    res.setHeader("Access-Control-Allow-Origin", allowOrigin);
+    res.setHeader("Vary", "Origin");
+    res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type");
+    res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+    if (allowCredentials && allowOrigin !== "*") {
+      res.setHeader("Access-Control-Allow-Credentials", "true");
+    }
+  }
+
+  if (!origin) return { allowed: true };
+  if (allowAll || (origin && normalized.includes(origin))) return { allowed: true };
+  return { allowed: false };
+}
+
+export function handleCorsPreflight(input: {
+  req: IncomingMessage;
+  res: ServerResponse;
+  allowedOrigins?: string[];
+  allowCredentials?: boolean;
+}): { handled: boolean; allowed: boolean } {
+  const { req, res, allowedOrigins, allowCredentials } = input;
+  const cors = applyCorsHeaders({ req, res, allowedOrigins, allowCredentials });
+  if (req.method !== "OPTIONS") return { handled: false, allowed: cors.allowed };
+  if (!cors.allowed) {
+    res.statusCode = 403;
+    res.end("CORS origin not allowed");
+    return { handled: true, allowed: false };
+  }
+  res.statusCode = 204;
+  res.end();
+  return { handled: true, allowed: true };
+}
+
 export function normalizeKey(input: string): string {
   const lower = input.trim().toLowerCase();
   if (!lower) return "issue";

@@ -9,6 +9,7 @@ export interface EnrichedMessageParams extends MessageParams {
 
 export function buildEnrichedMessage(params: EnrichedMessageParams): string {
   const baseMessage = buildMessage(params);
+  if (params.compact) return baseMessage;
 
   const linearTools = `
 ## Linear API — Available Operations
@@ -120,6 +121,7 @@ Note: replaces the entire plan each time. Include all steps.
 
 - Use @mentions by including plain Linear URLs: https://linear.app/TEAM/profiles/USERNAME
 - Reference issues via URLs: https://linear.app/TEAM/issue/IDENTIFIER — they render as mentions
+- Do not use web_fetch or web_search for URLs containing "/resources/articles" (skip those links)
 - Post thoughts and actions to show progress during long-running tasks
 - Update the session plan as you complete steps
 - Use elicitation with the "select" signal to present options to the user

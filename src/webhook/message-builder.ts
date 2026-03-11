@@ -11,6 +11,7 @@ export interface MessageParams {
   repo: string;
   session: string;
   context: string;
+  compact?: boolean;
 }
 
 export function buildLabel(id: string, title: string): string {
@@ -21,6 +22,7 @@ export function buildLabel(id: string, title: string): string {
 }
 
 export function buildMessage(params: MessageParams): string {
+  const compact = params.compact === true;
   const issueLine =
     params.id || params.title
       ? `Linear issue: ${params.id} ${params.title}`.trim()
@@ -28,19 +30,25 @@ export function buildMessage(params: MessageParams): string {
   const actionLine = params.action
     ? `Linear action: ${params.action}`
     : "";
-  const guidanceLine = params.context
+  const guidanceLine = compact
     ? ""
-    : params.guidance
-      ? `Guidance:\n${params.guidance}`
-      : "";
-  const descLine = params.context
+    : params.context
+      ? ""
+      : params.guidance
+        ? `Guidance:\n${params.guidance}`
+        : "";
+  const descLine = compact
     ? ""
-    : params.desc
-      ? `Description:\n${params.desc}`
+    : params.context
+      ? ""
+      : params.desc
+        ? `Description:\n${params.desc}`
+        : "";
+  const contextLine = compact
+    ? ""
+    : params.context
+      ? `Prompt context:\n${params.context}`
       : "";
-  const contextLine = params.context
-    ? `Prompt context:\n${params.context}`
-    : "";
   const lines = [
     actionLine,
     issueLine,

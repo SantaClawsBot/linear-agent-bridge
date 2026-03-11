@@ -2,7 +2,13 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { OpenClawPluginApi, PluginConfig, SessionContext } from "../types.js";
 import { normalizeCfg } from "../config.js";
 import { validateSessionToken } from "../agent/session-token.js";
-import { readBody, readHeader, sendJson } from "../util.js";
+import {
+  handleCorsPreflight,
+  applyCorsHeaders,
+  readBody,
+  readHeader,
+  sendJson,
+} from "../util.js";
 
 export type ApiHandler = (params: {
   api: OpenClawPluginApi;
@@ -25,12 +31,32 @@ export function createApiRouter(
   api: OpenClawPluginApi,
 ): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
   return async (req, res) => {
+    const cfg = normalizeCfg(api.pluginConfig);
+    const preflight = handleCorsPreflight({
+      req,
+      res,
+      allowedOrigins: cfg.apiCorsOrigins,
+      allowCredentials: cfg.apiCorsAllowCredentials,
+    });
+    if (preflight.handled) return;
+    if (!preflight.allowed) {
+      sendJson(res, 403, { ok: false, error: "CORS origin not allowed" });
+      return;
+    }
+
     if (req.method !== "POST") {
       res.statusCode = 405;
-      res.setHeader("Allow", "POST");
+      res.setHeader("Allow", "POST, OPTIONS");
       res.end("Method Not Allowed");
       return;
     }
+
+    applyCorsHeaders({
+      req,
+      res,
+      allowedOrigins: cfg.apiCorsOrigins,
+      allowCredentials: cfg.apiCorsAllowCredentials,
+    });
 
     const authHeader = readHeader(req, "authorization") ?? "";
     const token = authHeader.startsWith("Bearer ")
@@ -59,7 +85,6 @@ export function createApiRouter(
       return;
     }
 
-    const cfg = normalizeCfg(api.pluginConfig);
     const rawAction = typeof body.action === "string" ? body.action : "";
     const action = rawAction.startsWith("/") ? rawAction : `/${rawAction}`;
     const handler = routes.get(action);
