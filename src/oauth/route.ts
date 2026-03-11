@@ -1,3 +1,4 @@
+import { createHash, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { OpenClawPluginApi } from "../types.js";
 import { normalizeCfg } from "../config.js";
@@ -30,11 +31,22 @@ export function createLinearOauthRoute(
     if (req.method === "GET") {
       const url = new URL(req.url || "/", "http://localhost");
       const code = url.searchParams.get("code")?.trim();
+      const state = url.searchParams.get("state")?.trim();
       if (!code) {
         sendJson(res, 400, { ok: false, error: "Missing OAuth code query parameter" });
         return;
       }
-      const tokenSet = await exchangeCode(api, code, cfg.linearOauthRedirectUri, cfg.linearOauthClientId, cfg.linearOauthClientSecret);
+      if (!isValidOauthState(state, cfg.linearWebhookSecret)) {
+        sendJson(res, 403, { ok: false, error: "Invalid OAuth state" });
+        return;
+      }
+      const tokenSet = await exchangeCode(
+        api,
+        code,
+        cfg.linearOauthRedirectUri,
+        cfg.linearOauthClientId,
+        cfg.linearOauthClientSecret,
+      );
       if (!tokenSet) {
         sendJson(res, 400, { ok: false, error: "Failed to exchange OAuth code" });
         return;
@@ -69,16 +81,24 @@ export function createLinearOauthRoute(
       return;
     }
     const code = readString(payload.code);
-    const redirectUri = readString(payload.redirectUri) ?? cfg.linearOauthRedirectUri;
-    const clientId = readString(payload.clientId) ?? cfg.linearOauthClientId;
-    const clientSecret = readString(payload.clientSecret) ?? cfg.linearOauthClientSecret;
+    const state = readString(payload.state);
 
     if (!code) {
       sendJson(res, 400, { ok: false, error: "Missing code" });
       return;
     }
+    if (!isValidOauthState(state, cfg.linearWebhookSecret)) {
+      sendJson(res, 403, { ok: false, error: "Invalid OAuth state" });
+      return;
+    }
 
-    const tokenSet = await exchangeCode(api, code, redirectUri, clientId, clientSecret);
+    const tokenSet = await exchangeCode(
+      api,
+      code,
+      cfg.linearOauthRedirectUri,
+      cfg.linearOauthClientId,
+      cfg.linearOauthClientSecret,
+    );
     if (!tokenSet) {
       sendJson(res, 400, { ok: false, error: "Failed to exchange OAuth code" });
       return;
@@ -93,10 +113,22 @@ export function createLinearOauthRoute(
   };
 }
 
+function isValidOauthState(state: string | undefined, secret: string | undefined): boolean {
+  if (!state || !secret) return false;
+  const expected = createHash("sha256").update(`linear-oauth:${secret}`).digest("hex");
+  try {
+    const a = Buffer.from(state, "utf8");
+    const b = Buffer.from(expected, "utf8");
+    return a.length === b.length && timingSafeEqual(a, b);
+  } catch {
+    return false;
+  }
+}
+
 async function persistToken(pathFromCfg: string | undefined, tokenSet: LinearTokenSet): Promise<void> {
   const storePath = resolveTokenStorePath(pathFromCfg);
   await saveTokenSet(storePath, tokenSet);
-  clearTokenCache();
+  clearTokenCache(storePath);
 }
 
 export async function exchangeCode(

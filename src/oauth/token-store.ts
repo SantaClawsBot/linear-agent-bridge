@@ -11,7 +11,7 @@ export interface LinearTokenSet {
   updatedAt: string;
 }
 
-const cacheRef: { value?: LinearTokenSet } = {};
+const cacheRef = new Map<string, LinearTokenSet>();
 
 export function resolveTokenStorePath(explicit?: string): string {
   if (explicit?.trim()) return explicit.trim();
@@ -20,7 +20,8 @@ export function resolveTokenStorePath(explicit?: string): string {
 }
 
 export async function loadTokenSet(filePath: string): Promise<LinearTokenSet | undefined> {
-  if (cacheRef.value) return cacheRef.value;
+  const cached = cacheRef.get(filePath);
+  if (cached) return cached;
   const raw = await fs.readFile(filePath, "utf8").catch(() => "");
   if (!raw) return undefined;
   try {
@@ -37,7 +38,7 @@ export async function loadTokenSet(filePath: string): Promise<LinearTokenSet | u
       createdAt: typeof parsed.createdAt === "string" ? parsed.createdAt : new Date().toISOString(),
       updatedAt: typeof parsed.updatedAt === "string" ? parsed.updatedAt : new Date().toISOString(),
     };
-    cacheRef.value = token;
+    cacheRef.set(filePath, token);
     return token;
   } catch {
     return undefined;
@@ -49,9 +50,14 @@ export async function saveTokenSet(filePath: string, token: LinearTokenSet): Pro
   await fs.mkdir(dir, { recursive: true, mode: 0o700 });
   const payload = JSON.stringify(token, null, 2);
   await fs.writeFile(filePath, payload, { mode: 0o600 });
-  cacheRef.value = token;
+  await fs.chmod(filePath, 0o600).catch(() => {});
+  cacheRef.set(filePath, token);
 }
 
-export function clearTokenCache(): void {
-  cacheRef.value = undefined;
+export function clearTokenCache(filePath?: string): void {
+  if (filePath) {
+    cacheRef.delete(filePath);
+    return;
+  }
+  cacheRef.clear();
 }

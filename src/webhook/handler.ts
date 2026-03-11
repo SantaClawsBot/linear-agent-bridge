@@ -520,7 +520,7 @@ async function isExplicitlyAddressed(input: {
   const parentId = readString(comment?.parentId) ?? readString(data.parentId as string) ?? "";
   const commentId = readString(comment?.id) ?? readString(data.commentId as string) ?? "";
   if (kind === "Comment" && parentId) {
-    const ownerHandle = await resolveThreadOwnerHandle(api, cfg, commentId);
+    const ownerHandle = await resolveThreadOwnerHandle(api, cfg, commentId, handle);
     if (ownerHandle) {
       if (handle && ownerHandle === handle) {
         return { ok: true, reason: "thread-owned-by-us" };
@@ -538,17 +538,17 @@ function extractMentionHandles(text: string): Set<string> {
   return new Set(matches.map((m) => (m[1] ?? "").toLowerCase()).filter(Boolean));
 }
 
-function pickBotLikeHandle(handles: Set<string>): string {
-  for (const h of handles) {
-    if (h.includes("openclaw") || h.endsWith("-bot") || h.endsWith("bot")) return h;
-  }
-  return "";
+function pickThreadOwnerHandle(handles: Set<string>, expectedHandle?: string): string {
+  const expected = (expectedHandle ?? "").trim().toLowerCase().replace(/^@/, "");
+  if (expected && handles.has(expected)) return expected;
+  return handles.values().next().value ?? "";
 }
 
 async function resolveThreadOwnerHandle(
   api: OpenClawPluginApi,
   cfg: PluginConfig,
   commentId: string,
+  expectedHandle?: string,
 ): Promise<string> {
   if (!commentId) return "";
   const { COMMENT_THREAD_NODE_QUERY } = await import("../graphql/queries.js");
@@ -570,7 +570,7 @@ async function resolveThreadOwnerHandle(
 
     if (!parentId) {
       const handles = extractMentionHandles(body.toLowerCase());
-      return pickBotLikeHandle(handles);
+      return pickThreadOwnerHandle(handles, expectedHandle);
     }
 
     const parent = readObject(node.parent);
@@ -579,7 +579,7 @@ async function resolveThreadOwnerHandle(
     if (parent && parentObjId && !parentObjParentId) {
       const rootBody = readString(parent.body) ?? "";
       const handles = extractMentionHandles(rootBody.toLowerCase());
-      return pickBotLikeHandle(handles);
+      return pickThreadOwnerHandle(handles, expectedHandle);
     }
 
     currentId = parentObjId || parentId;
