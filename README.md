@@ -191,6 +191,8 @@ Authentication requires **one** of these modes:
 | `enableAgentApi` | `boolean` | `true` | Enable the API proxy that agents call during execution |
 | `apiBaseUrl` | `string` | auto-detected | Override the auto-detected base URL for agent API callbacks |
 | `linearTokenStorePath` | `string` | `~/.openclaw/workspace/.pi/linear-oauth.json` | Workspace-local OAuth token store path (written with `0600`) |
+| `apiCorsOrigins` | `string[]` | — | Allowed origins for CORS on `/plugins/linear/api`. Use `["*"]` to allow any origin |
+| `apiCorsAllowCredentials` | `boolean` | `false` | Adds `Access-Control-Allow-Credentials: true` when origin is explicitly allowed |
 
 ### Addressing Controls
 
@@ -234,6 +236,8 @@ Authentication requires **one** of these modes:
   "strictAddressing": true,
   "mentionHandle": "personal-openclaw",
   "enableAgentApi": true,
+  "apiCorsOrigins": ["https://linear.app", "https://linear.com"],
+  "apiCorsAllowCredentials": false,
   "externalUrlBase": "https://dash.example.com/sessions/{session}"
 }
 ```

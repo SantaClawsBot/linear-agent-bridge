@@ -26,6 +26,8 @@ export function normalizeCfg(
     apiBaseUrl: readCfgString(cfg, "apiBaseUrl"),
     strictAddressing: readCfgBool(cfg, "strictAddressing"),
     mentionHandle: readCfgString(cfg, "mentionHandle"),
+    apiCorsOrigins: readCfgStringArray(cfg, "apiCorsOrigins"),
+    apiCorsAllowCredentials: readCfgBool(cfg, "apiCorsAllowCredentials"),
   };
 }
 
@@ -62,4 +64,18 @@ function readCfgMap(
     }
   }
   return Object.keys(out).length > 0 ? out : undefined;
+}
+
+
+function readCfgStringArray(
+  cfg: Record<string, unknown>,
+  key: string,
+): string[] | undefined {
+  const raw = cfg[key];
+  if (!Array.isArray(raw)) return undefined;
+  const values = raw
+    .filter((v): v is string => typeof v === "string")
+    .map((v) => v.trim())
+    .filter(Boolean);
+  return values.length > 0 ? values : undefined;
 }

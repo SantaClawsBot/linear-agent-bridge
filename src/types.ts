@@ -41,7 +41,10 @@ export interface PluginConfig {
   apiBaseUrl?: string;
   strictAddressing?: boolean;
   mentionHandle?: string;
+  apiCorsOrigins?: string[];
+  apiCorsAllowCredentials?: boolean;
 }
+
 
 export type ActivityType =
   | "thought"
