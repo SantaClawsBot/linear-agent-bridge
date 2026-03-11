@@ -10,7 +10,7 @@ import type {
   ActivityOptions,
 } from "../types.js";
 import { normalizeCfg } from "../config.js";
-import { callLinear } from "../linear-client.js";
+import { callLinear, resolveViewer } from "../linear-client.js";
 import { ACTIVITY_MUTATION, SESSION_UPDATE_MUTATION } from "../graphql/mutations.js";
 import {
   readBody,
@@ -176,6 +176,7 @@ async function handleAgentEvent(
     api.logger.info?.("linear agent event ignored");
     return;
   }
+  const kind = readString(data.type as string) ?? "";
   const issue = resolveIssue(data);
   const issueId = readString(issue?.id) ?? "";
   const id = readString(issue?.identifier) ?? "";
@@ -193,7 +194,27 @@ async function handleAgentEvent(
       return;
     }
   }
+
+  if (cfg.strictAddressing === true) {
+    const viewerId = await resolveViewer(api, cfg);
+    const addressed = await isExplicitlyAddressed({
+      api,
+      cfg,
+      kind,
+      action,
+      data,
+      prompt,
+      viewerId,
+      mentionHandle: cfg.mentionHandle,
+    });
+    if (!addressed.ok) {
+      api.logger.info?.(`linear event ignored (strictAddressing: ${addressed.reason})`);
+      return;
+    }
+  }
+
   const context = resolveContext(data);
+  const compactMessage = action === "prompted";
   const team = resolveKey(issue?.team);
   const proj = resolveKey(issue?.project);
   const repo = resolveRepo(cfg, team, proj);
@@ -215,7 +236,7 @@ async function handleAgentEvent(
   // Mark in-flight immediately (before any await) to prevent races.
   if (session) inflightSessions.set(session, Date.now());
 
-  const key = normalizeKey(session || id || title || randomUUID());
+  const key = normalizeKey(session || id || randomUUID());
   const sessionKey = `agent:${agent}:linear:${key}`;
   const idem = delivery ?? randomUUID();
   const signal = resolveSignal(data);
@@ -291,6 +312,7 @@ async function handleAgentEvent(
       repo,
       session,
       context,
+      compact: compactMessage,
       apiBaseUrl,
       apiToken,
       issueId,
@@ -309,55 +331,88 @@ async function handleAgentEvent(
       repo,
       session,
       context,
+      compact: compactMessage,
     });
   }
 
   // Run the agent and post response
   try {
     const call = await loadCallGateway(api);
-    await call({
-      method: "agent",
-      params: {
-        message,
-        agentId: agent,
-        sessionKey,
-        label,
-        idempotencyKey: idem,
-        deliver,
-        channel: cfg.notifyChannel,
-        to: cfg.notifyTo,
-        accountId: cfg.notifyAccountId,
-      },
-      expectFinal: true,
-      timeoutMs: AGENT_TIMEOUT_MS,
-    })
-      .then((result) => {
-        // Cleanup
-        if (session) inflightSessions.delete(session);
-        if (apiToken) revokeSessionToken(apiToken);
-        if (session) cleanupSession(session);
 
-        const text = buildAgentResponse(result);
-        // Only post if agent hasn't already posted a response via API
-        if (session && hasPostedResponse(session)) {
-          clearResponseFlag(session);
+    const runAgent = (key: string, idemKey: string) =>
+      call({
+        method: "agent",
+        params: {
+          message,
+          agentId: agent,
+          sessionKey: key,
+          label,
+          idempotencyKey: idemKey,
+          deliver,
+          channel: cfg.notifyChannel,
+          to: cfg.notifyTo,
+          accountId: cfg.notifyAccountId,
+        },
+        expectFinal: true,
+        timeoutMs: AGENT_TIMEOUT_MS,
+      });
+
+    const handleSuccess = (result: unknown) => {
+      if (session) inflightSessions.delete(session);
+      if (apiToken) revokeSessionToken(apiToken);
+      if (session) cleanupSession(session);
+
+      const text = buildAgentResponse(result);
+      if (session && hasPostedResponse(session)) {
+        clearResponseFlag(session);
+        return;
+      }
+      if (!text || text === "Agent completed with no reply.") return;
+      postActivity(api, cfg, session, { type: "response", body: text }).catch(() => {});
+    };
+
+    try {
+      const result = await runAgent(sessionKey, idem);
+      handleSuccess(result);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const isAgentSessionMismatch =
+        msg.includes("does not match session key agent") ||
+        msg.includes("invalid agent params") && msg.includes("session key agent");
+
+      if (isAgentSessionMismatch) {
+        const freshSessionKey = `agent:${agent}:linear:${normalizeKey(randomUUID())}`;
+        const retryIdem = randomUUID();
+        api.logger.warn?.(`linear agent/session mismatch detected; retrying with fresh session key (${freshSessionKey})`);
+        try {
+          const retryResult = await runAgent(freshSessionKey, retryIdem);
+          handleSuccess(retryResult);
+          return;
+        } catch (retryErr) {
+          const retryMsg = retryErr instanceof Error ? retryErr.message : String(retryErr);
+          if (session) inflightSessions.delete(session);
+          if (apiToken) revokeSessionToken(apiToken);
+          if (session) cleanupSession(session);
+          if (session) clearResponseFlag(session);
+          api.logger.warn?.(`linear agent retry failed: ${retryMsg}`);
+          postActivity(api, cfg, session, {
+            type: "error",
+            body: `Agent run failed: ${retryMsg}`,
+          }).catch(() => {});
           return;
         }
-        if (!text || text === "Agent completed with no reply.") return;
-        postActivity(api, cfg, session, { type: "response", body: text }).catch(() => {});
-      })
-      .catch((err) => {
-        if (session) inflightSessions.delete(session);
-        if (apiToken) revokeSessionToken(apiToken);
-        if (session) cleanupSession(session);
-        if (session) clearResponseFlag(session);
-        const msg = err instanceof Error ? err.message : String(err);
-        api.logger.warn?.(`linear agent run failed: ${msg}`);
-        postActivity(api, cfg, session, {
-          type: "error",
-          body: `Agent run failed: ${msg}`,
-        }).catch(() => {});
-      });
+      }
+
+      if (session) inflightSessions.delete(session);
+      if (apiToken) revokeSessionToken(apiToken);
+      if (session) cleanupSession(session);
+      if (session) clearResponseFlag(session);
+      api.logger.warn?.(`linear agent run failed: ${msg}`);
+      postActivity(api, cfg, session, {
+        type: "error",
+        body: `Agent run failed: ${msg}`,
+      }).catch(() => {});
+    }
   } catch (err) {
     if (session) inflightSessions.delete(session);
     if (apiToken) revokeSessionToken(apiToken);
@@ -414,6 +469,122 @@ async function updateSessionExternalUrl(
   const root = readObject(result.data!.agentSessionUpdate);
   if (root && root.success === true) return;
   api.logger.warn?.("linear agentSessionUpdate failed");
+}
+
+async function isExplicitlyAddressed(input: {
+  api: OpenClawPluginApi;
+  cfg: PluginConfig;
+  kind: string;
+  action: string;
+  data: Record<string, unknown>;
+  prompt: string;
+  viewerId: string;
+  mentionHandle?: string;
+}): Promise<{ ok: boolean; reason: string }> {
+  const { api, cfg, kind, action, data, prompt, viewerId, mentionHandle } = input;
+
+  // Session creation events are allowed only when delegated to this app user.
+  if (action === "created") {
+    const issue = resolveIssue(data);
+    const delegate = readObject(issue?.delegate);
+    const delegateId = readString(delegate?.id) ?? "";
+    if (viewerId && delegateId && delegateId === viewerId) {
+      return { ok: true, reason: "delegated-to-app" };
+    }
+    // In strict mode, also allow explicit mention on create events.
+    const handle = (mentionHandle ?? "").trim().toLowerCase().replace(/^@/, "");
+    const createdMentions = extractMentionHandles((prompt ?? "").toLowerCase());
+    if (handle && createdMentions.has(handle)) {
+      return { ok: true, reason: "explicit-mention-on-create" };
+    }
+    return { ok: false, reason: "created-without-delegation" };
+  }
+
+  const comment = readObject(data.comment);
+  const bodyRaw = `${prompt}\n${readString(comment?.body) ?? ""}`;
+  const body = bodyRaw.toLowerCase();
+  const handle = (mentionHandle ?? "").trim().toLowerCase().replace(/^@/, "");
+  const mentionedHandles = extractMentionHandles(body);
+
+  // If current comment mentions handles and not ours, skip (targeting someone else).
+  if (mentionedHandles.size > 0 && handle && !mentionedHandles.has(handle)) {
+    return { ok: false, reason: "mentioned-other-bot" };
+  }
+
+  // Explicit mention of this app always allows processing.
+  if (handle && mentionedHandles.has(handle)) {
+    return { ok: true, reason: "explicit-mention" };
+  }
+
+  // For thread replies, lock on root thread owner mention when present.
+  const parentId = readString(comment?.parentId) ?? readString(data.parentId as string) ?? "";
+  const commentId = readString(comment?.id) ?? readString(data.commentId as string) ?? "";
+  if (kind === "Comment" && parentId) {
+    const ownerHandle = await resolveThreadOwnerHandle(api, cfg, commentId, handle);
+    if (ownerHandle) {
+      if (handle && ownerHandle === handle) {
+        return { ok: true, reason: "thread-owned-by-us" };
+      }
+      return { ok: false, reason: `thread-owned-by-${ownerHandle}` };
+    }
+    return { ok: false, reason: "thread-owner-unknown" };
+  }
+
+  return { ok: false, reason: "not-addressed" };
+}
+
+function extractMentionHandles(text: string): Set<string> {
+  const matches = Array.from((text ?? "").matchAll(/@([a-z0-9._-]+)/gi));
+  return new Set(matches.map((m) => (m[1] ?? "").toLowerCase()).filter(Boolean));
+}
+
+function pickThreadOwnerHandle(handles: Set<string>, expectedHandle?: string): string {
+  const expected = (expectedHandle ?? "").trim().toLowerCase().replace(/^@/, "");
+  if (expected && handles.has(expected)) return expected;
+  return handles.values().next().value ?? "";
+}
+
+async function resolveThreadOwnerHandle(
+  api: OpenClawPluginApi,
+  cfg: PluginConfig,
+  commentId: string,
+  expectedHandle?: string,
+): Promise<string> {
+  if (!commentId) return "";
+  const { COMMENT_THREAD_NODE_QUERY } = await import("../graphql/queries.js");
+
+  let currentId = commentId;
+  let safety = 0;
+  while (currentId && safety < 12) {
+    safety += 1;
+    const result = await callLinear(api, cfg, "commentThreadNode", {
+      query: COMMENT_THREAD_NODE_QUERY,
+      variables: { id: currentId },
+    });
+    if (!result.ok) return "";
+    const node = readObject(result.data?.comment);
+    if (!node) return "";
+
+    const parentId = readString(node.parentId) ?? "";
+    const body = readString(node.body) ?? "";
+
+    if (!parentId) {
+      const handles = extractMentionHandles(body.toLowerCase());
+      return pickThreadOwnerHandle(handles, expectedHandle);
+    }
+
+    const parent = readObject(node.parent);
+    const parentObjId = readString(parent?.id) ?? "";
+    const parentObjParentId = readString(parent?.parentId) ?? "";
+    if (parent && parentObjId && !parentObjParentId) {
+      const rootBody = readString(parent.body) ?? "";
+      const handles = extractMentionHandles(rootBody.toLowerCase());
+      return pickThreadOwnerHandle(handles, expectedHandle);
+    }
+
+    currentId = parentObjId || parentId;
+  }
+  return "";
 }
 
 function normalizePayload(

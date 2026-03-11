@@ -23,6 +23,10 @@ export interface PluginConfig {
   devAgentId?: string;
   linearWebhookSecret?: string;
   linearApiKey?: string;
+  linearOauthClientId?: string;
+  linearOauthClientSecret?: string;
+  linearOauthRedirectUri?: string;
+  linearTokenStorePath?: string;
   notifyChannel?: string;
   notifyTo?: string;
   notifyAccountId?: string;
@@ -35,7 +39,12 @@ export interface PluginConfig {
   externalUrlLabel?: string;
   enableAgentApi?: boolean;
   apiBaseUrl?: string;
+  strictAddressing?: boolean;
+  mentionHandle?: string;
+  apiCorsOrigins?: string[];
+  apiCorsAllowCredentials?: boolean;
 }
+
 
 export type ActivityType =
   | "thought"

@@ -18,6 +18,22 @@
         "type": "string",
         "description": "Linear OAuth token for posting activities and updating issues"
       },
+      "linearOauthClientId": {
+        "type": "string",
+        "description": "Linear OAuth client ID for code exchange/refresh"
+      },
+      "linearOauthClientSecret": {
+        "type": "string",
+        "description": "Linear OAuth client secret for code exchange/refresh"
+      },
+      "linearOauthRedirectUri": {
+        "type": "string",
+        "description": "Redirect URI configured in Linear app settings"
+      },
+      "linearTokenStorePath": {
+        "type": "string",
+        "description": "Workspace-local path for persisted Linear OAuth tokens"
+      },
       "notifyChannel": {
         "type": "string",
         "description": "Optional channel to deliver agent responses (e.g., 'discord')"
@@ -32,12 +48,16 @@
       },
       "repoByTeam": {
         "type": "object",
-        "additionalProperties": { "type": "string" },
+        "additionalProperties": {
+          "type": "string"
+        },
         "description": "Map Linear team keys to repository directories"
       },
       "repoByProject": {
         "type": "object",
-        "additionalProperties": { "type": "string" },
+        "additionalProperties": {
+          "type": "string"
+        },
         "description": "Map Linear project keys to repository directories"
       },
       "defaultDir": {
@@ -67,14 +87,58 @@
       "apiBaseUrl": {
         "type": "string",
         "description": "Override auto-detected base URL for agent API calls"
+      },
+      "strictAddressing": {
+        "type": "boolean",
+        "description": "Process only explicitly addressed events (mentions/delegation/thread replies)"
+      },
+      "mentionHandle": {
+        "type": "string",
+        "description": "App mention handle used for strict addressing (e.g. personal-openclaw)"
+      },
+      "apiCorsOrigins": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Allowed origins for CORS on /plugins/linear/api (use [\"*\"] to allow any origin)"
+      },
+      "apiCorsAllowCredentials": {
+        "type": "boolean",
+        "description": "Set Access-Control-Allow-Credentials on /plugins/linear/api responses"
       }
     }
   },
   "uiHints": {
-    "linearWebhookSecret": { "label": "Webhook secret", "sensitive": true },
-    "linearApiKey": { "label": "API key / OAuth token", "sensitive": true },
-    "delegateOnCreate": { "label": "Auto delegate" },
-    "startOnCreate": { "label": "Move to started" },
+    "linearWebhookSecret": {
+      "label": "Webhook secret",
+      "sensitive": true
+    },
+    "linearApiKey": {
+      "label": "API key / OAuth token",
+      "sensitive": true
+    },
+    "linearOauthClientId": {
+      "label": "OAuth client ID",
+      "sensitive": true
+    },
+    "linearOauthClientSecret": {
+      "label": "OAuth client secret",
+      "sensitive": true
+    },
+    "linearOauthRedirectUri": {
+      "label": "OAuth redirect URI"
+    },
+    "linearTokenStorePath": {
+      "label": "OAuth token store path",
+      "placeholder": "/home/ubuntu/.openclaw/workspace/.pi/linear-oauth.json"
+    },
+    "delegateOnCreate": {
+      "label": "Auto delegate"
+    },
+    "startOnCreate": {
+      "label": "Move to started"
+    },
     "externalUrlBase": {
       "label": "External session URL",
       "placeholder": "https://your-gateway/sessions/{session}"
@@ -83,10 +147,26 @@
       "label": "External URL label",
       "placeholder": "OpenClaw session"
     },
-    "enableAgentApi": { "label": "Enable agent API" },
+    "enableAgentApi": {
+      "label": "Enable agent API"
+    },
     "apiBaseUrl": {
       "label": "API base URL override",
       "placeholder": "https://your-hostname.ts.net"
+    },
+    "strictAddressing": {
+      "label": "Strict addressing mode"
+    },
+    "mentionHandle": {
+      "label": "Mention handle",
+      "placeholder": "personal-openclaw"
+    },
+    "apiCorsOrigins": {
+      "label": "API CORS origins",
+      "placeholder": "https://linear.app"
+    },
+    "apiCorsAllowCredentials": {
+      "label": "API CORS allow credentials"
     }
   }
 }

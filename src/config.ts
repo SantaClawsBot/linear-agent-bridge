@@ -8,6 +8,10 @@ export function normalizeCfg(
     devAgentId: readCfgString(cfg, "devAgentId"),
     linearWebhookSecret: readCfgString(cfg, "linearWebhookSecret"),
     linearApiKey: readCfgString(cfg, "linearApiKey"),
+    linearOauthClientId: readCfgString(cfg, "linearOauthClientId"),
+    linearOauthClientSecret: readCfgString(cfg, "linearOauthClientSecret"),
+    linearOauthRedirectUri: readCfgString(cfg, "linearOauthRedirectUri"),
+    linearTokenStorePath: readCfgString(cfg, "linearTokenStorePath"),
     notifyChannel: readCfgString(cfg, "notifyChannel"),
     notifyTo: readCfgString(cfg, "notifyTo"),
     notifyAccountId: readCfgString(cfg, "notifyAccountId"),
@@ -20,6 +24,10 @@ export function normalizeCfg(
     externalUrlLabel: readCfgString(cfg, "externalUrlLabel"),
     enableAgentApi: readCfgBool(cfg, "enableAgentApi"),
     apiBaseUrl: readCfgString(cfg, "apiBaseUrl"),
+    strictAddressing: readCfgBool(cfg, "strictAddressing"),
+    mentionHandle: readCfgString(cfg, "mentionHandle"),
+    apiCorsOrigins: readCfgStringArray(cfg, "apiCorsOrigins"),
+    apiCorsAllowCredentials: readCfgBool(cfg, "apiCorsAllowCredentials"),
   };
 }
 
@@ -56,4 +64,18 @@ function readCfgMap(
     }
   }
   return Object.keys(out).length > 0 ? out : undefined;
+}
+
+
+function readCfgStringArray(
+  cfg: Record<string, unknown>,
+  key: string,
+): string[] | undefined {
+  const raw = cfg[key];
+  if (!Array.isArray(raw)) return undefined;
+  const values = raw
+    .filter((v): v is string => typeof v === "string")
+    .map((v) => v.trim())
+    .filter(Boolean);
+  return values.length > 0 ? values : undefined;
 }
