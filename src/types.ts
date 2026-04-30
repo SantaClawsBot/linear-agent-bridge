@@ -10,6 +10,7 @@ export interface OpenClawPluginApi {
     debug?: (msg: string) => void;
   };
   callGateway?: unknown;
+  runtime?: Record<string, unknown>;
   registerHttpRoute: (opts: {
     path: string;
     auth?: string;
