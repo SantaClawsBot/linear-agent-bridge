@@ -50,6 +50,7 @@ src/
     session-ops.ts      — session plan, create-on-issue/comment, external URL
     delegation-ops.ts   — delegate/reassign issues to agents or humans
     query-ops.ts        — query issue detail, team info, repo suggestions, viewer
+    pr-ops.ts           — git branch/commit/PR workflow (gh CLI)
   agent/
     session-token.ts    — per-run bearer token create/validate/revoke
     context-builder.ts  — buildEnrichedMessage (agent prompt with API docs)
@@ -76,6 +77,7 @@ During execution, the agent can call `POST /plugins/linear/api/*` with the beare
 - Delegate issues to other agents or humans
 - Query issue details, team info, repository suggestions
 - Create proactive sessions on issues/comments
+- Create git branches, commit changes, and submit PRs via `gh` CLI
 
 Base URL is auto-detected from the `Host` header of incoming webhooks (Tailscale), overridable via `apiBaseUrl` config.
 
