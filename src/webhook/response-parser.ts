@@ -3,6 +3,11 @@ import { readArray, readObject, readString } from "../util.js";
 export function buildAgentResponse(input: unknown): string {
   const payload = readObject(input);
   if (!payload) return "";
+
+  // Direct text reply from dispatchReply deliver callback: {text: "..."}
+  const directText = readString(payload.text);
+  if (directText) return directText;
+
   const result = readObject(payload.result);
   const payloads = readArray(result?.payloads);
   const text = collectPayloadText(payloads);

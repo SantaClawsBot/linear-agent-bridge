@@ -344,12 +344,14 @@ async function handleAgentEvent(
     // Try api.runtime.channel dispatch first (native plugin API),
     // fall back to loadCallGateway (older OpenClaw versions)
     try {
+      api.logger.info?.(`linear: attempting dispatchToAgentRuntime, agentId=${agent}, sessionKey=${sessionKey}`);
       agentResult = await dispatchToAgentRuntime(api, {
         message,
         agentId: agent,
         sessionKey,
         label,
       });
+      api.logger.info?.(`linear: dispatchToAgentRuntime completed, result=${JSON.stringify(agentResult)}`);
     } catch (dispatchErr) {
       const dispatchMsg = dispatchErr instanceof Error ? dispatchErr.message : String(dispatchErr);
       api.logger.info?.(`linear: runtime dispatch failed (${dispatchMsg}), trying callGateway`);
@@ -633,18 +635,23 @@ async function dispatchToAgentRuntime(
     OriginatingTo: `linear-agent-bridge:${params.sessionKey}`,
   });
 
+  let capturedReply: unknown = undefined;
+
   await dispatchReply({
     ctx,
     cfg,
     dispatcherOptions: {
-      deliver: async () => {},
+      deliver: async (reply: unknown) => {
+        capturedReply = reply;
+      },
       onError: (err: unknown) => {
         api.logger.warn?.(`linear agent dispatch error: ${err instanceof Error ? err.message : String(err)}`);
       },
     },
   });
 
-  return { ok: true };
+  api.logger.info?.(`linear: captured reply type=${typeof capturedReply}`);
+  return capturedReply ?? { ok: true };
 }
 
 async function loadCallGateway(
