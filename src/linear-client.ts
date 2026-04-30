@@ -11,21 +11,45 @@ const LINEAR_API_URL = "https://api.linear.app/graphql";
 const warnRef = { value: false };
 const viewerRef: { value?: string } = {};
 
+// Labels that require OAuth token (Agent Session API).
+const OAUTH_ONLY_LABELS = new Set([
+  "agentActivityCreate",
+  "agentSessionCreate",
+  "agentSessionUpdate",
+  "agentSessionPlan",
+]);
+
 export async function callLinear(
   api: OpenClawPluginApi,
   cfg: PluginConfig,
   label: string,
   body: { query: string; variables: Record<string, unknown> },
 ): Promise<LinearCallResult> {
-  // Prefer OAuth token (required for Agent Session ops like agentActivityCreate).
-  // Fall back to API key for non-agent operations.
-  let token: string | undefined;
+  const requiresOAuth = OAUTH_ONLY_LABELS.has(label);
+
+  // Resolve candidate tokens.
   const stored = await getStoredAccessToken(cfg.linearTokenStorePath);
-  token = stored?.accessToken || cfg.linearApiKey;
+  const oauthToken = stored?.accessToken;
+  const apiKey = cfg.linearApiKey;
+
+  // Agent Session operations require OAuth; others can use either.
+  // When OAuth is required and unavailable, skip the API key to avoid
+  // the "Using an unexpected authentication method (apiKey)" error.
+  let token: string | undefined;
+  if (requiresOAuth) {
+    token = oauthToken;
+    if (!token) {
+      api.logger.warn?.(`linear ${label} requires OAuth token but none available`);
+      return { ok: false };
+    }
+  } else {
+    token = oauthToken || apiKey;
+  }
   if (!token) {
     warnMissingApiKey(api);
     return { ok: false };
   }
+
   // Linear API keys (lin_api_*) go raw; OAuth tokens use Bearer prefix
   const authHeader = token.startsWith("lin_api_") ? token : `Bearer ${token}`;
   let res = await fetch(LINEAR_API_URL, {
@@ -38,7 +62,7 @@ export async function callLinear(
   }).catch(() => null);
 
   // Try one refresh cycle if OAuth credentials are configured.
-  if (res?.status === 401 && !cfg.linearApiKey) {
+  if (res?.status === 401 && oauthToken) {
     const refreshed = await refreshStoredToken(api, {
       tokenStorePath: cfg.linearTokenStorePath,
       clientId: cfg.linearOauthClientId,
@@ -46,7 +70,7 @@ export async function callLinear(
     });
     if (refreshed?.accessToken) {
       token = refreshed.accessToken;
-      const refreshAuth = token.startsWith("lin_api_") ? token : `Bearer ${token}`;
+      const refreshAuth = `Bearer ${token}`;
       res = await fetch(LINEAR_API_URL, {
         method: "POST",
         headers: {
