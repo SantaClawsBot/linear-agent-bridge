@@ -13,21 +13,25 @@ import "./src/api/pr-ops.js";
 
 export default function register(api: OpenClawPluginApi): void {
   api.registerHttpRoute({
+    auth: "plugin",
     path: "/plugins/linear/linear",
     handler: createLinearWebhook(api),
   });
 
   api.registerHttpRoute({
+    auth: "plugin",
     path: "/plugins/linear/api",
     handler: createApiRouter(api),
   });
 
   api.registerHttpRoute({
+    auth: "plugin",
     path: "/plugins/linear/oauth/callback",
     handler: createLinearOauthRoute(api),
   });
 
   api.registerHttpRoute({
+    auth: "plugin",
     path: "/plugins/linear/oauth/exchange",
     handler: createLinearOauthRoute(api),
   });
