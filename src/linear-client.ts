@@ -26,11 +26,13 @@ export async function callLinear(
     warnMissingApiKey(api);
     return { ok: false };
   }
+  // Linear API keys (lin_api_*) go raw; OAuth tokens use Bearer prefix
+  const authHeader = token.startsWith("lin_api_") ? token : `Bearer ${token}`;
   let res = await fetch(LINEAR_API_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
+      Authorization: authHeader,
     },
     body: JSON.stringify(body),
   }).catch(() => null);
@@ -44,11 +46,12 @@ export async function callLinear(
     });
     if (refreshed?.accessToken) {
       token = refreshed.accessToken;
+      const refreshAuth = token.startsWith("lin_api_") ? token : `Bearer ${token}`;
       res = await fetch(LINEAR_API_URL, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
+          Authorization: refreshAuth,
         },
         body: JSON.stringify(body),
       }).catch(() => null);

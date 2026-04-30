@@ -339,17 +339,29 @@ async function handleAgentEvent(
 
   // Run the agent and post response
   try {
-    const call = await loadCallGateway(api);
+    let agentResult: unknown;
 
-    const runAgent = (key: string, idemKey: string) =>
-      call({
+    // Try api.runtime.channel dispatch first (native plugin API),
+    // fall back to loadCallGateway (older OpenClaw versions)
+    try {
+      agentResult = await dispatchToAgentRuntime(api, {
+        message,
+        agentId: agent,
+        sessionKey,
+        label,
+      });
+    } catch (dispatchErr) {
+      const dispatchMsg = dispatchErr instanceof Error ? dispatchErr.message : String(dispatchErr);
+      api.logger.info?.(`linear: runtime dispatch failed (${dispatchMsg}), trying callGateway`);
+      const call = await loadCallGateway(api);
+      agentResult = await call({
         method: "agent",
         params: {
           message,
           agentId: agent,
-          sessionKey: key,
+          sessionKey,
           label,
-          idempotencyKey: idemKey,
+          idempotencyKey: idem,
           deliver,
           channel: cfg.notifyChannel,
           to: cfg.notifyTo,
@@ -358,63 +370,20 @@ async function handleAgentEvent(
         expectFinal: true,
         timeoutMs: AGENT_TIMEOUT_MS,
       });
-
-    const handleSuccess = (result: unknown) => {
-      if (session) inflightSessions.delete(session);
-      if (apiToken) revokeSessionToken(apiToken);
-      if (session) cleanupSession(session);
-
-      const text = buildAgentResponse(result);
-      if (session && hasPostedResponse(session)) {
-        clearResponseFlag(session);
-        return;
-      }
-      if (!text || text === "Agent completed with no reply.") return;
-      postActivity(api, cfg, session, { type: "response", body: text }).catch(() => {});
-    };
-
-    try {
-      const result = await runAgent(sessionKey, idem);
-      handleSuccess(result);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      const isAgentSessionMismatch =
-        msg.includes("does not match session key agent") ||
-        msg.includes("invalid agent params") && msg.includes("session key agent");
-
-      if (isAgentSessionMismatch) {
-        const freshSessionKey = `agent:${agent}:linear:${normalizeKey(randomUUID())}`;
-        const retryIdem = randomUUID();
-        api.logger.warn?.(`linear agent/session mismatch detected; retrying with fresh session key (${freshSessionKey})`);
-        try {
-          const retryResult = await runAgent(freshSessionKey, retryIdem);
-          handleSuccess(retryResult);
-          return;
-        } catch (retryErr) {
-          const retryMsg = retryErr instanceof Error ? retryErr.message : String(retryErr);
-          if (session) inflightSessions.delete(session);
-          if (apiToken) revokeSessionToken(apiToken);
-          if (session) cleanupSession(session);
-          if (session) clearResponseFlag(session);
-          api.logger.warn?.(`linear agent retry failed: ${retryMsg}`);
-          postActivity(api, cfg, session, {
-            type: "error",
-            body: `Agent run failed: ${retryMsg}`,
-          }).catch(() => {});
-          return;
-        }
-      }
-
-      if (session) inflightSessions.delete(session);
-      if (apiToken) revokeSessionToken(apiToken);
-      if (session) cleanupSession(session);
-      if (session) clearResponseFlag(session);
-      api.logger.warn?.(`linear agent run failed: ${msg}`);
-      postActivity(api, cfg, session, {
-        type: "error",
-        body: `Agent run failed: ${msg}`,
-      }).catch(() => {});
     }
+
+    // Agent completed successfully
+    if (session) inflightSessions.delete(session);
+    if (apiToken) revokeSessionToken(apiToken);
+    if (session) cleanupSession(session);
+
+    const text = buildAgentResponse(agentResult);
+    if (session && hasPostedResponse(session)) {
+      clearResponseFlag(session);
+      return;
+    }
+    if (!text || text === "Agent completed with no reply.") return;
+    postActivity(api, cfg, session, { type: "response", body: text }).catch(() => {});
   } catch (err) {
     if (session) inflightSessions.delete(session);
     if (apiToken) revokeSessionToken(apiToken);
@@ -611,6 +580,71 @@ function logEvent(
   const action = readString(data.action as string) ?? "";
   const name = action ? `${label} ${action}` : label;
   api.logger.info?.(`linear ${name}`);
+}
+
+async function dispatchToAgentRuntime(
+  api: OpenClawPluginApi,
+  params: {
+    message: string;
+    agentId: string;
+    sessionKey: string;
+    label: string;
+  },
+): Promise<unknown> {
+  const core = api.runtime as Record<string, unknown>;
+  const cfg = api.config as Record<string, unknown>;
+
+  const channelRouting = core.channel as Record<string, Record<string, unknown>>;
+  const resolveRoute = channelRouting.routing?.resolveAgentRoute;
+  if (typeof resolveRoute !== "function") {
+    throw new Error("api.runtime.channel.routing.resolveAgentRoute not available");
+  }
+
+  const route = resolveRoute({
+    cfg,
+    channel: "linear-agent-bridge",
+    accountId: "default",
+    peer: { kind: "direct", id: params.sessionKey },
+  });
+
+  const channelReply = channelRouting.reply as Record<string, unknown>;
+  const finalizeCtx = channelReply.finalizeInboundContext;
+  const dispatchReply = channelReply.dispatchReplyWithBufferedBlockDispatcher;
+
+  if (typeof finalizeCtx !== "function" || typeof dispatchReply !== "function") {
+    throw new Error("api.runtime.channel.reply methods not available");
+  }
+
+  const ctx = finalizeCtx({
+    Body: params.message,
+    BodyForAgent: params.message,
+    RawBody: params.message,
+    CommandBody: params.message,
+    From: `linear-agent-bridge:${params.sessionKey}`,
+    To: `linear-agent-bridge:${route.agentId}`,
+    SessionKey: route.sessionKey ?? params.sessionKey,
+    AccountId: route.accountId ?? "default",
+    ChatType: "direct",
+    ConversationLabel: params.label,
+    SenderId: params.sessionKey,
+    Provider: "linear-agent-bridge",
+    Surface: "linear-agent-bridge",
+    OriginatingChannel: "linear-agent-bridge",
+    OriginatingTo: `linear-agent-bridge:${params.sessionKey}`,
+  });
+
+  await dispatchReply({
+    ctx,
+    cfg,
+    dispatcherOptions: {
+      deliver: async () => {},
+      onError: (err: unknown) => {
+        api.logger.warn?.(`linear agent dispatch error: ${err instanceof Error ? err.message : String(err)}`);
+      },
+    },
+  });
+
+  return { ok: true };
 }
 
 async function loadCallGateway(
