@@ -17,11 +17,11 @@ export async function callLinear(
   label: string,
   body: { query: string; variables: Record<string, unknown> },
 ): Promise<LinearCallResult> {
-  let token = cfg.linearApiKey;
-  if (!token) {
-    const stored = await getStoredAccessToken(cfg.linearTokenStorePath);
-    token = stored?.accessToken;
-  }
+  // Prefer OAuth token (required for Agent Session ops like agentActivityCreate).
+  // Fall back to API key for non-agent operations.
+  let token: string | undefined;
+  const stored = await getStoredAccessToken(cfg.linearTokenStorePath);
+  token = stored?.accessToken || cfg.linearApiKey;
   if (!token) {
     warnMissingApiKey(api);
     return { ok: false };
