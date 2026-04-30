@@ -162,7 +162,9 @@ async function handleWebhook(
     ? data
     : { ...data, agentSessionId: sessionId };
   rememberSessionHint(eventData, sessionId);
-  await handleAgentEvent(api, cfg, eventData, delivery);
+  // Dispatch through concurrency limiter instead of calling handleAgentEvent directly.
+  const { enqueueAgentRun } = await import("./concurrency.js");
+  enqueueAgentRun(api, cfg, eventData, delivery, handleAgentEvent);
 }
 
 async function handleAgentEvent(
