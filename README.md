@@ -18,6 +18,7 @@ An [OpenClaw](https://github.com/nicepkg/openclaw) plugin that turns Linear's Ag
   - [Session Management](#session-management)
   - [Delegation](#delegation)
   - [Queries](#queries)
+  - [Git & Pull Request Workflow](#git--pull-request-workflow)
 - [Architecture](#architecture)
 - [Development](#development)
 - [Troubleshooting](#troubleshooting)
@@ -194,6 +195,13 @@ Authentication requires **one** of these modes:
 | `apiCorsOrigins` | `string[]` | — | Allowed origins for CORS on `/plugins/linear/api`. Use `["*"]` to allow any origin |
 | `apiCorsAllowCredentials` | `boolean` | `false` | Adds `Access-Control-Allow-Credentials: true` when origin is explicitly allowed |
 
+### Git & Pull Requests
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `branchPrefix` | `string` | `"linear"` | Prefix for auto-generated branch names |
+| `prReportToLinear` | `boolean` | `true` | Auto-post PR URL to Linear session as external URL and activity |
+
 ### Addressing Controls
 
 | Option | Type | Default | Description |
@@ -331,7 +339,19 @@ The agent can ask the user to choose between options using the `select` signal:
 }
 ```
 
-### 7. Proactive Sessions
+### 7. End-to-End Issue to PR
+
+The most powerful use case: delegate an issue and the agent implements the code and submits a PR.
+
+1. The agent receives the issue via webhook
+2. Calls `pr/branch` to create an isolated branch
+3. Uses `exec` to implement the code changes
+4. Calls `pr/commit` to stage and commit
+5. Calls `pr/create` to push and open a pull request
+6. The PR URL is automatically posted back to the Linear session
+7. Calls `issue/close` to mark the issue as done
+
+### 8. Proactive Sessions
 
 The agent can create new sessions on other issues or comments without being explicitly delegated:
 
@@ -522,6 +542,45 @@ Returns ranked suggestions with confidence scores.
 #### `query/viewer` — Get Current App Identity
 
 No parameters. Returns the authenticated app's user ID.
+
+### Git & Pull Request Workflow
+
+These actions enable the agent to implement code changes and submit pull requests. They use `git` and `gh` (GitHub CLI) in the configured repository directory.
+
+#### `pr/branch` — Create a Branch for the Issue
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `branch` | `string` | No | Custom branch name (auto-generated if omitted) |
+| `base` | `string` | No | Base branch to branch from (defaults to HEAD) |
+
+Auto-generates a branch name from the issue identifier (e.g. `linear/ENG-123-fix-bug`). Uses the `branchPrefix` config (default: `"linear"`).
+
+#### `pr/commit` — Stage and Commit Changes
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `message` | `string` | No | Commit message (defaults to `ISSUE-123: Issue title`) |
+| `all` | `boolean` | No | Stage all changes with `git add -A` (default: `true`) |
+| `files` | `string[]` | No | Specific files to stage (only when `all: false`) |
+| `allowEmpty` | `boolean` | No | Allow empty commits (default: `false`) |
+
+#### `pr/create` — Push and Create a Pull Request
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `title` | `string` | No | PR title (defaults to `ISSUE-123 Issue title`) |
+| `body` | `string` | No | PR body (defaults to `Closes <issue URL>`) |
+| `base` | `string` | No | Target branch (default: `"main"`) |
+| `draft` | `boolean` | No | Create as draft PR (default: `false`) |
+| `labels` | `string[]` | No | Labels to apply |
+| `reviewers` | `string[]` | No | Reviewers to request |
+
+Pushes the current branch to origin and creates a PR via `gh pr create`. When `prReportToLinear` is enabled (default), the PR URL is automatically posted to the Linear session as an external URL and activity.
+
+#### `pr/status` — Check Git Status
+
+No parameters. Returns the current branch name, number of dirty files, porcelain status output, and the 5 most recent commits.
 
 ## Architecture
 
