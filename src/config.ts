@@ -28,6 +28,8 @@ export function normalizeCfg(
     mentionHandle: readCfgString(cfg, "mentionHandle"),
     apiCorsOrigins: readCfgStringArray(cfg, "apiCorsOrigins"),
     apiCorsAllowCredentials: readCfgBool(cfg, "apiCorsAllowCredentials"),
+    branchPrefix: readCfgString(cfg, "branchPrefix"),
+    prReportToLinear: readCfgBool(cfg, "prReportToLinear"),
   };
 }
 

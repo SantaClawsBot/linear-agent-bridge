@@ -43,6 +43,10 @@ export interface PluginConfig {
   mentionHandle?: string;
   apiCorsOrigins?: string[];
   apiCorsAllowCredentials?: boolean;
+  /** Branch name prefix for PR branches (default: "linear") */
+  branchPrefix?: string;
+  /** Auto-post PR URL to Linear session as external URL + activity */
+  prReportToLinear?: boolean;
 }
 
 
@@ -79,6 +83,7 @@ export interface SessionContext {
   issueTitle: string;
   issueUrl: string;
   teamId: string;
+  repoDir: string;
   apiToken: string;
 }
 

@@ -106,6 +106,14 @@
       "apiCorsAllowCredentials": {
         "type": "boolean",
         "description": "Set Access-Control-Allow-Credentials on /plugins/linear/api responses"
+      },
+      "branchPrefix": {
+        "type": "string",
+        "description": "Branch name prefix for PR branches (default: 'linear')"
+      },
+      "prReportToLinear": {
+        "type": "boolean",
+        "description": "Auto-post PR URL to Linear session as external URL and activity (default: true)"
       }
     }
   },
@@ -167,6 +175,13 @@
     },
     "apiCorsAllowCredentials": {
       "label": "API CORS allow credentials"
+    },
+    "branchPrefix": {
+      "label": "Branch prefix",
+      "placeholder": "linear"
+    },
+    "prReportToLinear": {
+      "label": "Report PR to Linear"
     }
   }
 }

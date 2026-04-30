@@ -289,6 +289,7 @@ async function handleAgentEvent(
       issueTitle: title,
       issueUrl: url,
       teamId,
+      repoDir: repo,
       apiToken: "", // will be set below
     };
     apiToken = createSessionToken(sessionCtx);
@@ -317,6 +318,7 @@ async function handleAgentEvent(
       apiToken,
       issueId,
       teamId,
+      repoDir: repo,
     });
   } else {
     api.logger.info?.(`linear handler: PLAIN message (no enrichment), enableApi=${enableApi}, apiToken=${apiToken ? "set" : "empty"}`);
