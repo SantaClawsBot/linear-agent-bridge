@@ -9,6 +9,7 @@ import "./src/api/activity-ops.js";
 import "./src/api/session-ops.js";
 import "./src/api/delegation-ops.js";
 import "./src/api/query-ops.js";
+import "./src/api/pr-ops.js";
 
 export default function register(api: OpenClawPluginApi): void {
   api.registerHttpRoute({
