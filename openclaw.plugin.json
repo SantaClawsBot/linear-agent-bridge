@@ -114,6 +114,10 @@
       "prReportToLinear": {
         "type": "boolean",
         "description": "Auto-post PR URL to Linear session as external URL and activity (default: true)"
+      },
+      "githubWebhookSecret": {
+        "type": "string",
+        "description": "GitHub webhook secret for verifying PR review event signatures"
       }
     }
   },
@@ -182,6 +186,10 @@
     },
     "prReportToLinear": {
       "label": "Report PR to Linear"
+    },
+    "githubWebhookSecret": {
+      "label": "GitHub webhook secret",
+      "sensitive": true
     }
   }
 }
