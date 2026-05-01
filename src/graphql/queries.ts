@@ -141,3 +141,18 @@ export const REPO_SUGGESTIONS_QUERY = `
     }
   }
 `;
+
+export const ISSUE_BY_IDENTIFIER_QUERY = `
+  query IssueByIdentifier($identifier: String!) {
+    issues(filter: { identifier: { eq: $identifier } }) {
+      nodes {
+        id
+        identifier
+        title
+        description
+        url
+        team { id }
+      }
+    }
+  }
+`;

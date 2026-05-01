@@ -30,6 +30,7 @@ export function normalizeCfg(
     apiCorsAllowCredentials: readCfgBool(cfg, "apiCorsAllowCredentials"),
     branchPrefix: readCfgString(cfg, "branchPrefix"),
     prReportToLinear: readCfgBool(cfg, "prReportToLinear"),
+    githubWebhookSecret: readCfgString(cfg, "githubWebhookSecret"),
   };
 }
 

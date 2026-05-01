@@ -49,6 +49,8 @@ export interface PluginConfig {
   branchPrefix?: string;
   /** Auto-post PR URL to Linear session as external URL + activity */
   prReportToLinear?: boolean;
+  /** GitHub webhook secret for PR review events (X-Hub-Signature-256) */
+  githubWebhookSecret?: string;
 }
 
 

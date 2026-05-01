@@ -586,7 +586,7 @@ function logEvent(
   api.logger.info?.(`linear ${name}`);
 }
 
-async function dispatchToAgentRuntime(
+export async function dispatchToAgentRuntime(
   api: OpenClawPluginApi,
   params: {
     message: string;
