@@ -127,14 +127,16 @@ Note: replaces the entire plan each time. Include all steps.
 When you need to implement code changes and submit a PR, follow this workflow:
 
 1. **Check repo status** — ${BT}pr/status${BT} to see current branch and changes
-2. **Create a branch** — ${BT}pr/branch${BT} to create an isolated branch for this issue
+2. **Create a branch** — ${BT}pr/branch${BT} to create an isolated worktree + branch for this issue
 3. **Make changes** — use your ${BT}exec${BT} tool to edit files, run tests, etc.
 4. **Commit changes** — ${BT}pr/commit${BT} to stage and commit
-5. **Create PR** — ${BT}pr/create${BT} to push and open a pull request
+5. **Create PR** — ${BT}pr/create${BT} to push and open a pull request (worktree is auto-cleaned)
 
-**action: "pr/branch"** — Create a new branch for this issue
+**action: "pr/branch"** — Create an isolated worktree and branch for this issue
 { action: "pr/branch", branch?: "custom-name", base?: "main" }
 Auto-generates branch name from issue identifier if not provided (e.g. ${BT}linear/eng-123-fix-bug${BT}).
+Creates a **git worktree** under ${BT}<repo>/.openclaw-worktrees/<issue-id>-<slug>/${BT} so each issue gets its own isolated checkout — no conflicts with other in-progress issues.
+After PR creation the worktree is automatically cleaned up.
 
 **action: "pr/commit"** — Stage and commit all changes
 { action: "pr/commit", message?: "commit message", all?: true, files?: ["path1.ts"], allowEmpty?: false }
@@ -148,6 +150,11 @@ PR URL is automatically posted back to the Linear session.
 **action: "pr/status"** — Check current git status
 { action: "pr/status" }
 Returns current branch, number of dirty files, and recent commits.
+If a worktree is active for this issue, ${BT}worktree${BT} field contains its path.
+
+**action: "pr/cleanup"** — Remove the worktree for this issue
+{ action: "pr/cleanup" }
+Removes the isolated worktree directory. Called automatically after PR creation.
 
 **Important:** If no repo directory is configured (see "Repo directory" above), the PR actions will fail. Ensure the plugin config has ${BT}defaultDir${BT}, ${BT}repoByTeam${BT}, or ${BT}repoByProject${BT} set.`);
 
