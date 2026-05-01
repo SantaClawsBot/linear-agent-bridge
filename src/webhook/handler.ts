@@ -342,6 +342,7 @@ async function handleAgentEvent(
   // Run the agent and post response
   try {
     let agentResult: unknown;
+    let usedRuntimeDispatch = false;
 
     // Try api.runtime.channel dispatch first (native plugin API),
     // fall back to loadCallGateway (older OpenClaw versions)
@@ -353,6 +354,7 @@ async function handleAgentEvent(
         sessionKey,
         label,
       });
+      usedRuntimeDispatch = true;
       api.logger.info?.(`linear: dispatchToAgentRuntime completed, result=${JSON.stringify(agentResult)}`);
     } catch (dispatchErr) {
       const dispatchMsg = dispatchErr instanceof Error ? dispatchErr.message : String(dispatchErr);
@@ -382,11 +384,19 @@ async function handleAgentEvent(
     if (session) cleanupSession(session);
 
     const text = buildAgentResponse(agentResult);
+    // If the agent explicitly posted a response via the API, skip auto-post.
     if (session && hasPostedResponse(session)) {
       clearResponseFlag(session);
       return;
     }
     if (!text || text === "Agent completed with no reply.") return;
+    // When dispatched via the runtime channel, the reply is delivered
+    // through the channel's own dispatch mechanism — posting again as
+    // a response activity would double-post in the agent chat window.
+    if (usedRuntimeDispatch) {
+      api.logger.info?.(`linear: skipping auto-post (runtime dispatch delivered reply)`);
+      return;
+    }
     postActivity(api, cfg, session, { type: "response", body: text }).catch(() => {});
   } catch (err) {
     if (session) inflightSessions.delete(session);
