@@ -383,6 +383,21 @@ async function handleAgentEvent(
     if (apiToken) revokeSessionToken(apiToken);
     if (session) cleanupSession(session);
 
+    // Detect "session busy" — runtime returned instantly with {ok:true} and no reply.
+    // This happens when the session is already being processed by a prior dispatch.
+    // The agent IS running; it just didn't produce new output for this duplicate dispatch.
+    const runtimeResult = agentResult as Record<string, unknown> | undefined;
+    const instantOk = usedRuntimeDispatch
+      && runtimeResult
+      && typeof runtimeResult === "object"
+      && runtimeResult.ok === true
+      && !runtimeResult.text
+      && Object.keys(runtimeResult).length <= 1;
+    if (instantOk) {
+      api.logger.info?.(`linear: session busy / no new output for session=${session ? session.slice(0, 8) + "..." : "(none)"}`);
+      return;
+    }
+
     const text = buildAgentResponse(agentResult);
     api.logger.info?.(`linear: agent run done, session=${session ? session.slice(0, 8) + "..." : "(none)"}, hasResponse=${Boolean(hasPostedResponse(session))}, textLen=${text.length}, usedRuntime=${usedRuntimeDispatch}, resultType=${typeof agentResult}`);
     // If the agent explicitly posted a response via the API, skip auto-post.
@@ -657,7 +672,7 @@ export async function dispatchToAgentRuntime(
     dispatcherOptions: {
       deliver: async (reply: unknown) => {
         const replyPreview = JSON.stringify(reply).slice(0, 300);
-        api.logger.info?.(`linear: deliver callback invoked, type=${typeof reply}, preview=${replyPreview}`);
+        api.logger.info?.(`linear: deliver callback for sessionKey=${params.sessionKey}, type=${typeof reply}, preview=${replyPreview}`);
         capturedReply = reply;
       },
       onError: (err: unknown) => {
