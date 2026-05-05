@@ -343,50 +343,19 @@ async function handleAgentEvent(
   try {
     let agentText: string | undefined;
     let agentError: string | undefined;
-    let usedFireAndForget = false;
 
-    // ── Strategy 1: Fire-and-forget via callGateway + delayed result poll ──
+    // ── Primary: In-process runtime dispatch (captures reply via deliver) ──
     //
-    // Fire-and-forget: dispatch the agent via callGateway and return immediately.
-    // The agent posts its response back to Linear via the API proxy
-    // (using http://127.0.0.1:PORT which bypasses the TLS proxy).
+    // Uses the gateway's internal channel routing to dispatch the agent
+    // and capture the reply. Runs in the same process (blocking the
+    // background Promise, not HTTP — webhook already returned 202).
     //
-    if (enableApi && apiToken) {
-      try {
-        const call = await loadCallGateway(api);
-        const dispatchResult = await call({
-          method: "agent",
-          params: {
-            message,
-            sessionKey,
-            label,
-            idempotencyKey: idem,
-            deliver: false,
-          },
-          timeoutMs: 30_000,
-        });
-        const runId = (dispatchResult as Record<string, unknown>)?.runId as string | undefined;
-        usedFireAndForget = true;
-        api.logger.info?.(`linear: fire-and-forget dispatch accepted, runId=${runId}, sessionKey=${sessionKey}`);
-
-        // Don't revoke the API token — the agent still needs it to post responses.
-        // It will be cleaned up when the agent posts a response, or expires.
-        if (session) inflightSessions.delete(session);
-        return;
-      } catch (fafErr) {
-        const fafMsg = fafErr instanceof Error ? fafErr.message : String(fafErr);
-        api.logger.warn?.(`linear: fire-and-forget dispatch failed (${fafMsg}), falling back to in-process`);
-      }
-    }
-
-    // ── Strategy 2: In-process runtime dispatch (fallback) ──
-    // Used when API proxy is disabled (no way for agent to post back).
-    if (!usedFireAndForget) {
+    {
       let agentResult: unknown;
       let usedRuntimeDispatch = false;
 
       try {
-        api.logger.info?.(`linear: attempting dispatchToAgentRuntime (in-process), agentId=${agent}, sessionKey=${sessionKey}`);
+        api.logger.info?.(`linear: attempting dispatchToAgentRuntime, agentId=${agent}, sessionKey=${sessionKey}`);
         agentResult = await dispatchToAgentRuntime(api, {
           message,
           agentId: agent,
@@ -440,7 +409,7 @@ async function handleAgentEvent(
       if (apiToken) revokeSessionToken(apiToken);
       if (session) cleanupSession(session);
 
-      api.logger.info?.(`linear: agent run done, session=${session ? session.slice(0, 8) + "..." : "(none)"}, hasResponse=${Boolean(hasPostedResponse(session))}, textLen=${agentText?.length ?? 0}, usedFireAndForget=${usedFireAndForget}, usedRuntime=${usedRuntimeDispatch}`);
+      api.logger.info?.(`linear: agent run done, session=${session ? session.slice(0, 8) + "..." : "(none)"}, hasResponse=${Boolean(hasPostedResponse(session))}, textLen=${agentText?.length ?? 0}, runtimeDispatch=${usedRuntimeDispatch}`);
 
       // If the agent explicitly posted a response via the API, skip auto-post.
       if (session && hasPostedResponse(session)) {
@@ -448,12 +417,8 @@ async function handleAgentEvent(
         return;
       }
 
-      // For in-process runtime dispatch: the reply may already be delivered
+      // Post the agent's response to Linear
       if (!agentText || agentText === "Agent completed with no reply.") return;
-      if (usedRuntimeDispatch) {
-        api.logger.info?.(`linear: skipping auto-post (runtime dispatch delivered reply)`);
-        return;
-      }
       api.logger.info?.(`linear: posting agent response to Linear (strategy 2), session=${session ? session.slice(0, 8) + "..." : "(none)"}, textLen=${agentText.length}`);
       postActivity(api, cfg, session, { type: "response", body: agentText }).catch((postErr) => {
         api.logger.warn?.(`linear: failed to post response to Linear (strategy 2): ${postErr instanceof Error ? postErr.message : String(postErr)}`);
