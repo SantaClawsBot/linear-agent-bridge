@@ -49,6 +49,7 @@ import { buildEnrichedMessage } from "../agent/context-builder.js";
 import { cleanupSession } from "../agent/plan-manager.js";
 import { hasPostedResponse, clearResponseFlag } from "../agent/response-tracker.js";
 import { captureBaseUrl } from "../api/base-url.js";
+import { dispatchViaAcp, isAcpAvailable } from "./acp-dispatch.js";
 
 const callRef: { value?: (opts: Record<string, unknown>) => Promise<unknown> } = {};
 
@@ -341,79 +342,126 @@ async function handleAgentEvent(
 
   // Run the agent and post response
   try {
-    let agentResult: unknown;
+    let agentText: string | undefined;
+    let usedAcp = false;
     let usedRuntimeDispatch = false;
+    let agentError: string | undefined;
 
-    // Try api.runtime.channel dispatch first (native plugin API),
-    // fall back to loadCallGateway (older OpenClaw versions)
-    try {
-      api.logger.info?.(`linear: attempting dispatchToAgentRuntime, agentId=${agent}, sessionKey=${sessionKey}`);
-      agentResult = await dispatchToAgentRuntime(api, {
-        message,
-        agentId: agent,
-        sessionKey,
-        label,
-      });
-      usedRuntimeDispatch = true;
-      api.logger.info?.(`linear: dispatchToAgentRuntime completed, result=${JSON.stringify(agentResult)}`);
-    } catch (dispatchErr) {
-      const dispatchMsg = dispatchErr instanceof Error ? dispatchErr.message : String(dispatchErr);
-      api.logger.info?.(`linear: runtime dispatch failed (${dispatchMsg}), trying callGateway`);
-      const call = await loadCallGateway(api);
-      agentResult = await call({
-        method: "agent",
-        params: {
+    // ── Strategy 1: ACP (out-of-process, non-blocking) ──
+    const acpAvailable = !cfg.disableAcp && isAcpAvailable(api);
+    api.logger.info?.(`linear: ACP check: disableAcp=${cfg.disableAcp}, available=${acpAvailable}, hasTaskFlow=${Boolean((api.runtime as Record<string, unknown>)?.taskFlow)}`);
+    if (acpAvailable) {
+      api.logger.info?.(`linear: attempting ACP dispatch, agentId=${agent}, sessionKey=${sessionKey}`);
+      try {
+        const acpResult = await dispatchViaAcp(api, {
           message,
           agentId: agent,
           sessionKey,
           label,
-          idempotencyKey: idem,
-          deliver,
-          channel: cfg.notifyChannel,
-          to: cfg.notifyTo,
-          accountId: cfg.notifyAccountId,
-        },
-        expectFinal: true,
-        timeoutMs: AGENT_TIMEOUT_MS,
-      });
+          cwd: repo || undefined,
+          acpAgent: cfg.acpAgent || undefined,
+        });
+        usedAcp = true;
+        if (acpResult.ok) {
+          agentText = acpResult.text;
+        } else {
+          agentError = acpResult.error;
+        }
+        api.logger.info?.(`linear: ACP dispatch done, ok=${acpResult.ok}, textLen=${acpResult.text?.length ?? 0}, err=${acpResult.error ?? "(none)"}`);
+      } catch (acpErr) {
+        const acpMsg = acpErr instanceof Error ? acpErr.message : String(acpErr);
+        api.logger.warn?.(`linear: ACP dispatch failed (${acpMsg}), falling back to in-process`);
+      }
     }
 
-    // Agent completed successfully
+    // ── Strategy 2: In-process runtime dispatch (fallback) ──
+    if (!usedAcp) {
+      let agentResult: unknown;
+
+      try {
+        api.logger.info?.(`linear: attempting dispatchToAgentRuntime (in-process), agentId=${agent}, sessionKey=${sessionKey}`);
+        agentResult = await dispatchToAgentRuntime(api, {
+          message,
+          agentId: agent,
+          sessionKey,
+          label,
+        });
+        usedRuntimeDispatch = true;
+        api.logger.info?.(`linear: dispatchToAgentRuntime completed, result=${JSON.stringify(agentResult)}`);
+      } catch (dispatchErr) {
+        const dispatchMsg = dispatchErr instanceof Error ? dispatchErr.message : String(dispatchErr);
+        api.logger.info?.(`linear: runtime dispatch failed (${dispatchMsg}), trying callGateway`);
+        const call = await loadCallGateway(api);
+        agentResult = await call({
+          method: "agent",
+          params: {
+            message,
+            agentId: agent,
+            sessionKey,
+            label,
+            idempotencyKey: idem,
+            deliver,
+            channel: cfg.notifyChannel,
+            to: cfg.notifyTo,
+            accountId: cfg.notifyAccountId,
+          },
+          expectFinal: true,
+          timeoutMs: AGENT_TIMEOUT_MS,
+        });
+      }
+
+      // Detect "session busy" — runtime returned instantly with {ok:true} and no reply.
+      const runtimeResult = agentResult as Record<string, unknown> | undefined;
+      const instantOk = usedRuntimeDispatch
+        && runtimeResult
+        && typeof runtimeResult === "object"
+        && runtimeResult.ok === true
+        && !runtimeResult.text
+        && Object.keys(runtimeResult).length <= 1;
+      if (instantOk) {
+        if (session) inflightSessions.delete(session);
+        if (apiToken) revokeSessionToken(apiToken);
+        if (session) cleanupSession(session);
+        api.logger.info?.(`linear: session busy / no new output for session=${session ? session.slice(0, 8) + "..." : "(none)"}`);
+        return;
+      }
+
+      agentText = buildAgentResponse(agentResult);
+    }
+
+    // Agent completed — post response to Linear
     if (session) inflightSessions.delete(session);
     if (apiToken) revokeSessionToken(apiToken);
     if (session) cleanupSession(session);
 
-    // Detect "session busy" — runtime returned instantly with {ok:true} and no reply.
-    // This happens when the session is already being processed by a prior dispatch.
-    // The agent IS running; it just didn't produce new output for this duplicate dispatch.
-    const runtimeResult = agentResult as Record<string, unknown> | undefined;
-    const instantOk = usedRuntimeDispatch
-      && runtimeResult
-      && typeof runtimeResult === "object"
-      && runtimeResult.ok === true
-      && !runtimeResult.text
-      && Object.keys(runtimeResult).length <= 1;
-    if (instantOk) {
-      api.logger.info?.(`linear: session busy / no new output for session=${session ? session.slice(0, 8) + "..." : "(none)"}`);
-      return;
-    }
+    api.logger.info?.(`linear: agent run done, session=${session ? session.slice(0, 8) + "..." : "(none)"}, hasResponse=${Boolean(hasPostedResponse(session))}, textLen=${agentText?.length ?? 0}, usedAcp=${usedAcp}, usedRuntime=${usedRuntimeDispatch}`);
 
-    const text = buildAgentResponse(agentResult);
-    api.logger.info?.(`linear: agent run done, session=${session ? session.slice(0, 8) + "..." : "(none)"}, hasResponse=${Boolean(hasPostedResponse(session))}, textLen=${text.length}, usedRuntime=${usedRuntimeDispatch}, resultType=${typeof agentResult}`);
     // If the agent explicitly posted a response via the API, skip auto-post.
     if (session && hasPostedResponse(session)) {
       clearResponseFlag(session);
       return;
     }
-    if (!text || text === "Agent completed with no reply.") return;
-    // When dispatched via the runtime channel, the reply is delivered
-    // through the channel's own dispatch mechanism — posting again as
-    // a response activity would double-post in the agent chat window.
+
+    // For ACP dispatch: always post the response to Linear
+    if (usedAcp) {
+      if (agentError) {
+        postActivity(api, cfg, session, {
+          type: "error",
+          body: `Agent run failed: ${agentError}`,
+        }).catch(() => {});
+      } else if (agentText) {
+        postActivity(api, cfg, session, { type: "response", body: agentText }).catch(() => {});
+      }
+      return;
+    }
+
+    // For in-process runtime dispatch: the reply may already be delivered
+    if (!agentText || agentText === "Agent completed with no reply.") return;
     if (usedRuntimeDispatch) {
       api.logger.info?.(`linear: skipping auto-post (runtime dispatch delivered reply)`);
       return;
     }
-    postActivity(api, cfg, session, { type: "response", body: text }).catch(() => {});
+    postActivity(api, cfg, session, { type: "response", body: agentText }).catch(() => {});
   } catch (err) {
     if (session) inflightSessions.delete(session);
     if (apiToken) revokeSessionToken(apiToken);

@@ -51,6 +51,10 @@ export interface PluginConfig {
   prReportToLinear?: boolean;
   /** GitHub webhook secret for PR review events (X-Hub-Signature-256) */
   githubWebhookSecret?: string;
+  /** ACP harness to use (e.g. "codex", "claude"). Default: "codex" */
+  acpAgent?: string;
+  /** Disable ACP dispatch and always use in-process runtime */
+  disableAcp?: boolean;
 }
 
 
