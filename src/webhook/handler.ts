@@ -344,72 +344,42 @@ async function handleAgentEvent(
     let agentText: string | undefined;
     let agentError: string | undefined;
 
-    // ── Primary: In-process runtime dispatch (captures reply via deliver) ──
+    // ── Primary: callGateway with expectFinal ──
     //
-    // Uses the gateway's internal channel routing to dispatch the agent
-    // and capture the reply. Runs in the same process (blocking the
-    // background Promise, not HTTP — webhook already returned 202).
+    // Uses callGateway to dispatch the agent and wait for the result.
+    // The webhook already returned 202 via queueMicrotask so we don't
+    // block HTTP. The event loop will be blocked during agent execution
+    // but recovers afterward.
     //
     {
-      let agentResult: unknown;
-      let usedRuntimeDispatch = false;
-
       try {
-        api.logger.info?.(`linear: attempting dispatchToAgentRuntime, agentId=${agent}, sessionKey=${sessionKey}`);
-        agentResult = await dispatchToAgentRuntime(api, {
-          message,
-          agentId: agent,
-          sessionKey,
-          label,
-        });
-        usedRuntimeDispatch = true;
-        api.logger.info?.(`linear: dispatchToAgentRuntime completed, result=${JSON.stringify(agentResult)}`);
-      } catch (dispatchErr) {
-        const dispatchMsg = dispatchErr instanceof Error ? dispatchErr.message : String(dispatchErr);
-        api.logger.info?.(`linear: runtime dispatch failed (${dispatchMsg}), trying callGateway (blocking)`);
         const call = await loadCallGateway(api);
-        agentResult = await call({
+        api.logger.info?.(`linear: dispatching via callGateway, sessionKey=${sessionKey}`);
+        const agentResult = await call({
           method: "agent",
           params: {
             message,
-            agentId: agent,
             sessionKey,
             label,
             idempotencyKey: idem,
-            deliver,
-            channel: cfg.notifyChannel,
-            to: cfg.notifyTo,
-            accountId: cfg.notifyAccountId,
           },
           expectFinal: true,
           timeoutMs: AGENT_TIMEOUT_MS,
         });
+        agentText = buildAgentResponse(agentResult);
+        api.logger.info?.(`linear: callGateway completed, sessionKey=${sessionKey}, textLen=${agentText?.length ?? 0}`);
+      } catch (dispatchErr) {
+        const dispatchMsg = dispatchErr instanceof Error ? dispatchErr.message : String(dispatchErr);
+        api.logger.warn?.(`linear: callGateway dispatch failed (${dispatchMsg})`);
       }
 
-      // Detect "session busy" — runtime returned instantly with {ok:true} and no reply.
-      const runtimeResult = agentResult as Record<string, unknown> | undefined;
-      const instantOk = usedRuntimeDispatch
-        && runtimeResult
-        && typeof runtimeResult === "object"
-        && runtimeResult.ok === true
-        && !runtimeResult.text
-        && Object.keys(runtimeResult).length <= 1;
-      if (instantOk) {
-        if (session) inflightSessions.delete(session);
-        if (apiToken) revokeSessionToken(apiToken);
-        if (session) cleanupSession(session);
-        api.logger.info?.(`linear: session busy / no new output for session=${session ? session.slice(0, 8) + "..." : "(none)"}`);
-        return;
-      }
-
-      agentText = buildAgentResponse(agentResult);
 
       // Agent completed — post response to Linear
       if (session) inflightSessions.delete(session);
       if (apiToken) revokeSessionToken(apiToken);
       if (session) cleanupSession(session);
 
-      api.logger.info?.(`linear: agent run done, session=${session ? session.slice(0, 8) + "..." : "(none)"}, hasResponse=${Boolean(hasPostedResponse(session))}, textLen=${agentText?.length ?? 0}, runtimeDispatch=${usedRuntimeDispatch}`);
+      api.logger.info?.(`linear: agent run done, session=${session ? session.slice(0, 8) + "..." : "(none)"}, hasResponse=${Boolean(hasPostedResponse(session))}, textLen=${agentText?.length ?? 0}`);
 
       // If the agent explicitly posted a response via the API, skip auto-post.
       if (session && hasPostedResponse(session)) {
