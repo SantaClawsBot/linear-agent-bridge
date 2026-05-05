@@ -345,12 +345,13 @@ async function handleAgentEvent(
     let agentError: string | undefined;
     let usedFireAndForget = false;
 
-    // ── Strategy 1: Fire-and-forget via callGateway (non-blocking) ──
+    // ── Strategy 1: Async dispatch via callGateway (non-blocking HTTP) ──
     //
-    // Uses callGateway with method:"agent" but does NOT wait for the final
-    // response. This is how sessions_spawn works internally — the gateway
-    // processes the agent run asynchronously. The agent posts its response
-    // back to Linear via the API proxy (bearer token in enriched prompt).
+    // Uses callGateway with method:"agent" and expectFinal:true to wait for
+    // the agent to finish. This is safe because the webhook already returned
+    // 202 via queueMicrotask — we're running in a background Promise.
+    // The gateway runs the agent through its scheduler (yields during LLM I/O)
+    // so the event loop stays responsive for health checks.
     //
     if (enableApi && apiToken) {
       try {
@@ -362,30 +363,22 @@ async function handleAgentEvent(
             sessionKey,
             label,
             idempotencyKey: idem,
-            deliver: false, // fire-and-forget — agent posts response via API
           },
-          // Don't set expectFinal — just get the runId back immediately
-          timeoutMs: 30_000, // short timeout for the dispatch itself
+          expectFinal: true,
+          timeoutMs: AGENT_TIMEOUT_MS,
         });
-        const runId = (result as Record<string, unknown>)?.runId as string | undefined;
         usedFireAndForget = true;
-        api.logger.info?.(`linear: fire-and-forget dispatch accepted, runId=${runId}, sessionKey=${sessionKey}`);
-
-        // Clean up inflight state — the agent runs asynchronously now
-        if (session) inflightSessions.delete(session);
-        // Note: we intentionally do NOT revoke the API token here — the
-        // agent still needs it to post responses. The token will be cleaned
-        // up by the API endpoint's response posting logic, or expires.
-        return;
+        agentText = buildAgentResponse(result);
+        api.logger.info?.(`linear: callGateway completed, sessionKey=${sessionKey}, textLen=${agentText?.length ?? 0}`);
       } catch (fafErr) {
         const fafMsg = fafErr instanceof Error ? fafErr.message : String(fafErr);
-        api.logger.warn?.(`linear: fire-and-forget dispatch failed (${fafMsg}), falling back to in-process`);
+        api.logger.warn?.(`linear: callGateway dispatch failed (${fafMsg}), falling back to in-process`);
       }
     }
 
     // ── Strategy 2: In-process runtime dispatch (fallback) ──
     // Used when API proxy is disabled (no way for agent to post back).
-    {
+    if (!usedFireAndForget) {
       let agentResult: unknown;
       let usedRuntimeDispatch = false;
 
@@ -458,6 +451,24 @@ async function handleAgentEvent(
         api.logger.info?.(`linear: skipping auto-post (runtime dispatch delivered reply)`);
         return;
       }
+      postActivity(api, cfg, session, { type: "response", body: agentText }).catch(() => {});
+    }
+
+    // ── Strategy 1 cleanup & response posting ──
+    if (usedFireAndForget) {
+      if (session) inflightSessions.delete(session);
+      if (apiToken) revokeSessionToken(apiToken);
+      if (session) cleanupSession(session);
+
+      api.logger.info?.(`linear: agent run done (callGateway), session=${session ? session.slice(0, 8) + "..." : "(none)"}, hasResponse=${Boolean(hasPostedResponse(session))}, textLen=${agentText?.length ?? 0}`);
+
+      // If the agent explicitly posted a response via the API, skip auto-post.
+      if (session && hasPostedResponse(session)) {
+        clearResponseFlag(session);
+        return;
+      }
+
+      if (!agentText || agentText === "Agent completed with no reply.") return;
       postActivity(api, cfg, session, { type: "response", body: agentText }).catch(() => {});
     }
   } catch (err) {
