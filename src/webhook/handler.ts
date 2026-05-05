@@ -384,6 +384,7 @@ async function handleAgentEvent(
     if (session) cleanupSession(session);
 
     const text = buildAgentResponse(agentResult);
+    api.logger.info?.(`linear: agent run done, session=${session ? session.slice(0, 8) + "..." : "(none)"}, hasResponse=${Boolean(hasPostedResponse(session))}, textLen=${text.length}, usedRuntime=${usedRuntimeDispatch}, resultType=${typeof agentResult}`);
     // If the agent explicitly posted a response via the API, skip auto-post.
     if (session && hasPostedResponse(session)) {
       clearResponseFlag(session);
@@ -648,12 +649,15 @@ export async function dispatchToAgentRuntime(
   });
 
   let capturedReply: unknown = undefined;
+  const dispatchStart = Date.now();
 
   await dispatchReply({
     ctx,
     cfg,
     dispatcherOptions: {
       deliver: async (reply: unknown) => {
+        const replyPreview = JSON.stringify(reply).slice(0, 300);
+        api.logger.info?.(`linear: deliver callback invoked, type=${typeof reply}, preview=${replyPreview}`);
         capturedReply = reply;
       },
       onError: (err: unknown) => {
@@ -662,7 +666,14 @@ export async function dispatchToAgentRuntime(
     },
   });
 
-  api.logger.info?.(`linear: captured reply type=${typeof capturedReply}`);
+  const replyType = typeof capturedReply;
+  const dispatchDurationMs = Date.now() - dispatchStart;
+  if (replyType === "undefined") {
+    api.logger.warn?.(`linear: captured reply type=undefined — agent produced no reply after ${dispatchDurationMs}ms. sessionKey=${params.sessionKey}`);
+  } else {
+    const preview = JSON.stringify(capturedReply).slice(0, 300);
+    api.logger.info?.(`linear: captured reply type=${replyType} after ${dispatchDurationMs}ms preview=${preview}`);
+  }
   return capturedReply ?? { ok: true };
 }
 
