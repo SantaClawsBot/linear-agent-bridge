@@ -158,14 +158,34 @@ Removes the isolated worktree directory. Called automatically after PR creation.
 
 **Important:** If no repo directory is configured (see "Repo directory" above), the PR actions will fail. Ensure the plugin config has ${BT}defaultDir${BT}, ${BT}repoByTeam${BT}, or ${BT}repoByProject${BT} set.`);
 
-  // Tips
-  sections.push(`### Tips
+  // Progress & Tips
+  sections.push(`### Progress Reporting — IMPORTANT
+
+You are visible to users in Linear. They see your activities in real-time. Keep them informed:
+
+1. **Start with a plan.** Before doing anything, call ${BT}session/plan${BT} with the steps you intend to follow.
+2. **Post thoughts as you reason.** Use ${BT}activity/thought${BT} to share your analysis, what you're about to do, and why.
+3. **Post actions for every significant operation.** Use ${BT}activity/action${BT} when you run commands, make API calls, edit files, query issues, etc.
+4. **Update the plan as you go.** Call ${BT}session/plan${BT} to mark steps inProgress/completed.
+5. **Post ${BT}activity/response${BT} only when fully done.** This is your final answer.
+
+Example flow:
+${codeBlock("json", [
+  '{ action: "session/plan", plan: [',
+  '  { content: "Analyze the issue", status: "inProgress" },',
+  '  { content: "Investigate codebase", status: "pending" },',
+  '  { content: "Implement fix", status: "pending" },',
+  '  { content: "Submit PR", status: "pending" }',
+  '] }',
+].join("\n"))}
+${codeBlock("json", '{ action: "activity/thought", body: "Looking at ENG-123... The error suggests a missing null check in the auth middleware." }')}
+${codeBlock("json", '{ action: "activity/action", activityAction: "reading", parameter: "src/middleware/auth.ts", result: "Found the issue — line 42 dereferences user.email without checking user exists." }')}
+
+### Tips
 
 - Use @mentions by including plain Linear URLs: https://linear.app/TEAM/profiles/USERNAME
 - Reference issues via URLs: https://linear.app/TEAM/issue/IDENTIFIER — they render as mentions
 - Do not use web_fetch or web_search for URLs containing "/resources/articles" (skip those links)
-- Post thoughts and actions to show progress during long-running tasks
-- Update the session plan as you complete steps
 - Use elicitation with the "select" signal to present options to the user
 - Post a response activity when your work is complete`);
 
