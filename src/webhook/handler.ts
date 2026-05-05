@@ -49,7 +49,6 @@ import { buildEnrichedMessage } from "../agent/context-builder.js";
 import { cleanupSession } from "../agent/plan-manager.js";
 import { hasPostedResponse, clearResponseFlag } from "../agent/response-tracker.js";
 import { captureBaseUrl } from "../api/base-url.js";
-import { dispatchViaAcp, isAcpAvailable } from "./acp-dispatch.js";
 
 const callRef: { value?: (opts: Record<string, unknown>) => Promise<unknown> } = {};
 
@@ -343,40 +342,52 @@ async function handleAgentEvent(
   // Run the agent and post response
   try {
     let agentText: string | undefined;
-    let usedAcp = false;
-    let usedRuntimeDispatch = false;
     let agentError: string | undefined;
+    let usedFireAndForget = false;
 
-    // ── Strategy 1: ACP (out-of-process, non-blocking) ──
-    const acpAvailable = !cfg.disableAcp && isAcpAvailable(api);
-    api.logger.info?.(`linear: ACP check: disableAcp=${cfg.disableAcp}, available=${acpAvailable}, hasTaskFlow=${Boolean((api.runtime as Record<string, unknown>)?.taskFlow)}`);
-    if (acpAvailable) {
-      api.logger.info?.(`linear: attempting ACP dispatch, agentId=${agent}, sessionKey=${sessionKey}`);
+    // ── Strategy 1: Fire-and-forget via callGateway (non-blocking) ──
+    //
+    // Uses callGateway with method:"agent" but does NOT wait for the final
+    // response. This is how sessions_spawn works internally — the gateway
+    // processes the agent run asynchronously. The agent posts its response
+    // back to Linear via the API proxy (bearer token in enriched prompt).
+    //
+    if (enableApi && apiToken) {
       try {
-        const acpResult = await dispatchViaAcp(api, {
-          message,
-          agentId: agent,
-          sessionKey,
-          label,
-          cwd: repo || undefined,
-          acpAgent: cfg.acpAgent || undefined,
+        const call = await loadCallGateway(api);
+        const result = await call({
+          method: "agent",
+          params: {
+            message,
+            sessionKey,
+            label,
+            idempotencyKey: idem,
+            deliver: false, // fire-and-forget — agent posts response via API
+          },
+          // Don't set expectFinal — just get the runId back immediately
+          timeoutMs: 30_000, // short timeout for the dispatch itself
         });
-        usedAcp = true;
-        if (acpResult.ok) {
-          agentText = acpResult.text;
-        } else {
-          agentError = acpResult.error;
-        }
-        api.logger.info?.(`linear: ACP dispatch done, ok=${acpResult.ok}, textLen=${acpResult.text?.length ?? 0}, err=${acpResult.error ?? "(none)"}`);
-      } catch (acpErr) {
-        const acpMsg = acpErr instanceof Error ? acpErr.message : String(acpErr);
-        api.logger.warn?.(`linear: ACP dispatch failed (${acpMsg}), falling back to in-process`);
+        const runId = (result as Record<string, unknown>)?.runId as string | undefined;
+        usedFireAndForget = true;
+        api.logger.info?.(`linear: fire-and-forget dispatch accepted, runId=${runId}, sessionKey=${sessionKey}`);
+
+        // Clean up inflight state — the agent runs asynchronously now
+        if (session) inflightSessions.delete(session);
+        // Note: we intentionally do NOT revoke the API token here — the
+        // agent still needs it to post responses. The token will be cleaned
+        // up by the API endpoint's response posting logic, or expires.
+        return;
+      } catch (fafErr) {
+        const fafMsg = fafErr instanceof Error ? fafErr.message : String(fafErr);
+        api.logger.warn?.(`linear: fire-and-forget dispatch failed (${fafMsg}), falling back to in-process`);
       }
     }
 
     // ── Strategy 2: In-process runtime dispatch (fallback) ──
-    if (!usedAcp) {
+    // Used when API proxy is disabled (no way for agent to post back).
+    {
       let agentResult: unknown;
+      let usedRuntimeDispatch = false;
 
       try {
         api.logger.info?.(`linear: attempting dispatchToAgentRuntime (in-process), agentId=${agent}, sessionKey=${sessionKey}`);
@@ -390,7 +401,7 @@ async function handleAgentEvent(
         api.logger.info?.(`linear: dispatchToAgentRuntime completed, result=${JSON.stringify(agentResult)}`);
       } catch (dispatchErr) {
         const dispatchMsg = dispatchErr instanceof Error ? dispatchErr.message : String(dispatchErr);
-        api.logger.info?.(`linear: runtime dispatch failed (${dispatchMsg}), trying callGateway`);
+        api.logger.info?.(`linear: runtime dispatch failed (${dispatchMsg}), trying callGateway (blocking)`);
         const call = await loadCallGateway(api);
         agentResult = await call({
           method: "agent",
@@ -427,41 +438,28 @@ async function handleAgentEvent(
       }
 
       agentText = buildAgentResponse(agentResult);
-    }
 
-    // Agent completed — post response to Linear
-    if (session) inflightSessions.delete(session);
-    if (apiToken) revokeSessionToken(apiToken);
-    if (session) cleanupSession(session);
+      // Agent completed — post response to Linear
+      if (session) inflightSessions.delete(session);
+      if (apiToken) revokeSessionToken(apiToken);
+      if (session) cleanupSession(session);
 
-    api.logger.info?.(`linear: agent run done, session=${session ? session.slice(0, 8) + "..." : "(none)"}, hasResponse=${Boolean(hasPostedResponse(session))}, textLen=${agentText?.length ?? 0}, usedAcp=${usedAcp}, usedRuntime=${usedRuntimeDispatch}`);
+      api.logger.info?.(`linear: agent run done, session=${session ? session.slice(0, 8) + "..." : "(none)"}, hasResponse=${Boolean(hasPostedResponse(session))}, textLen=${agentText?.length ?? 0}, usedFireAndForget=${usedFireAndForget}, usedRuntime=${usedRuntimeDispatch}`);
 
-    // If the agent explicitly posted a response via the API, skip auto-post.
-    if (session && hasPostedResponse(session)) {
-      clearResponseFlag(session);
-      return;
-    }
-
-    // For ACP dispatch: always post the response to Linear
-    if (usedAcp) {
-      if (agentError) {
-        postActivity(api, cfg, session, {
-          type: "error",
-          body: `Agent run failed: ${agentError}`,
-        }).catch(() => {});
-      } else if (agentText) {
-        postActivity(api, cfg, session, { type: "response", body: agentText }).catch(() => {});
+      // If the agent explicitly posted a response via the API, skip auto-post.
+      if (session && hasPostedResponse(session)) {
+        clearResponseFlag(session);
+        return;
       }
-      return;
-    }
 
-    // For in-process runtime dispatch: the reply may already be delivered
-    if (!agentText || agentText === "Agent completed with no reply.") return;
-    if (usedRuntimeDispatch) {
-      api.logger.info?.(`linear: skipping auto-post (runtime dispatch delivered reply)`);
-      return;
+      // For in-process runtime dispatch: the reply may already be delivered
+      if (!agentText || agentText === "Agent completed with no reply.") return;
+      if (usedRuntimeDispatch) {
+        api.logger.info?.(`linear: skipping auto-post (runtime dispatch delivered reply)`);
+        return;
+      }
+      postActivity(api, cfg, session, { type: "response", body: agentText }).catch(() => {});
     }
-    postActivity(api, cfg, session, { type: "response", body: agentText }).catch(() => {});
   } catch (err) {
     if (session) inflightSessions.delete(session);
     if (apiToken) revokeSessionToken(apiToken);
@@ -751,7 +749,14 @@ async function loadCallGateway(
   try {
     const argv1 =
       typeof process?.argv?.[1] === "string" ? process.argv[1] : "";
-    const distDir = argv1 ? path.dirname(argv1) : "";
+    let distDir = argv1 ? path.dirname(argv1) : "";
+    // argv1 is openclaw.mjs, distDir is the openclaw package root.
+    // The call-*.js files are in the dist/ subdirectory.
+    if (distDir && !fs.existsSync(path.join(distDir, "call-*.js"))) {
+      const distSub = path.join(distDir, "dist");
+      if (fs.existsSync(distSub)) distDir = distSub;
+    }
+    api.logger.info?.(`linear: loadCallGateway distDir=${distDir}`);
     if (distDir && fs.existsSync(distDir)) {
       const files = fs
         .readdirSync(distDir)
