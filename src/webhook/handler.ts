@@ -345,34 +345,37 @@ async function handleAgentEvent(
     let agentError: string | undefined;
     let usedFireAndForget = false;
 
-    // ── Strategy 1: Async dispatch via callGateway (non-blocking HTTP) ──
+    // ── Strategy 1: Fire-and-forget via callGateway + delayed result poll ──
     //
-    // Uses callGateway with method:"agent" and expectFinal:true to wait for
-    // the agent to finish. This is safe because the webhook already returned
-    // 202 via queueMicrotask — we're running in a background Promise.
-    // The gateway runs the agent through its scheduler (yields during LLM I/O)
-    // so the event loop stays responsive for health checks.
+    // Fire-and-forget: dispatch the agent via callGateway and return immediately.
+    // The agent posts its response back to Linear via the API proxy
+    // (using http://127.0.0.1:PORT which bypasses the TLS proxy).
     //
     if (enableApi && apiToken) {
       try {
         const call = await loadCallGateway(api);
-        const result = await call({
+        const dispatchResult = await call({
           method: "agent",
           params: {
             message,
             sessionKey,
             label,
             idempotencyKey: idem,
+            deliver: false,
           },
-          expectFinal: true,
-          timeoutMs: AGENT_TIMEOUT_MS,
+          timeoutMs: 30_000,
         });
+        const runId = (dispatchResult as Record<string, unknown>)?.runId as string | undefined;
         usedFireAndForget = true;
-        agentText = buildAgentResponse(result);
-        api.logger.info?.(`linear: callGateway completed, sessionKey=${sessionKey}, textLen=${agentText?.length ?? 0}`);
+        api.logger.info?.(`linear: fire-and-forget dispatch accepted, runId=${runId}, sessionKey=${sessionKey}`);
+
+        // Don't revoke the API token — the agent still needs it to post responses.
+        // It will be cleaned up when the agent posts a response, or expires.
+        if (session) inflightSessions.delete(session);
+        return;
       } catch (fafErr) {
         const fafMsg = fafErr instanceof Error ? fafErr.message : String(fafErr);
-        api.logger.warn?.(`linear: callGateway dispatch failed (${fafMsg}), falling back to in-process`);
+        api.logger.warn?.(`linear: fire-and-forget dispatch failed (${fafMsg}), falling back to in-process`);
       }
     }
 
@@ -451,25 +454,10 @@ async function handleAgentEvent(
         api.logger.info?.(`linear: skipping auto-post (runtime dispatch delivered reply)`);
         return;
       }
-      postActivity(api, cfg, session, { type: "response", body: agentText }).catch(() => {});
-    }
-
-    // ── Strategy 1 cleanup & response posting ──
-    if (usedFireAndForget) {
-      if (session) inflightSessions.delete(session);
-      if (apiToken) revokeSessionToken(apiToken);
-      if (session) cleanupSession(session);
-
-      api.logger.info?.(`linear: agent run done (callGateway), session=${session ? session.slice(0, 8) + "..." : "(none)"}, hasResponse=${Boolean(hasPostedResponse(session))}, textLen=${agentText?.length ?? 0}`);
-
-      // If the agent explicitly posted a response via the API, skip auto-post.
-      if (session && hasPostedResponse(session)) {
-        clearResponseFlag(session);
-        return;
-      }
-
-      if (!agentText || agentText === "Agent completed with no reply.") return;
-      postActivity(api, cfg, session, { type: "response", body: agentText }).catch(() => {});
+      api.logger.info?.(`linear: posting agent response to Linear (strategy 2), session=${session ? session.slice(0, 8) + "..." : "(none)"}, textLen=${agentText.length}`);
+      postActivity(api, cfg, session, { type: "response", body: agentText }).catch((postErr) => {
+        api.logger.warn?.(`linear: failed to post response to Linear (strategy 2): ${postErr instanceof Error ? postErr.message : String(postErr)}`);
+      });
     }
   } catch (err) {
     if (session) inflightSessions.delete(session);
@@ -481,7 +469,9 @@ async function handleAgentEvent(
     postActivity(api, cfg, session, {
       type: "error",
       body: `Agent run failed: ${msg}`,
-    }).catch(() => {});
+    }).catch((postErr) => {
+      api.logger.warn?.(`linear: failed to post error to Linear: ${postErr instanceof Error ? postErr.message : String(postErr)}`);
+    });
   }
 }
 
@@ -492,7 +482,11 @@ export async function postActivity(
   content: ActivityContent,
   opts: ActivityOptions = {},
 ): Promise<void> {
-  if (!session) return;
+  if (!session) {
+    api.logger.warn?.("linear postActivity: no session, skipping");
+    return;
+  }
+  api.logger.info?.(`linear postActivity: type=${content.type} session=${session.slice(0, 8)}... bodyLen=${typeof content.body === 'string' ? content.body.length : 0}`);
   const input: Record<string, unknown> = {
     agentSessionId: session,
     content,
@@ -504,10 +498,16 @@ export async function postActivity(
     query: ACTIVITY_MUTATION,
     variables: { input },
   });
-  if (!result.ok) return;
+  if (!result.ok) {
+    api.logger.warn?.(`linear postActivity: callLinear failed for type=${content.type}`);
+    return;
+  }
   const root = readObject(result.data!.agentActivityCreate);
-  if (root && root.success === true) return;
-  api.logger.warn?.("linear activity failed");
+  if (root && root.success === true) {
+    api.logger.info?.(`linear postActivity: success type=${content.type}`);
+    return;
+  }
+  api.logger.warn?.(`linear postActivity: unexpected result: ${JSON.stringify(root).slice(0, 200)}`);
 }
 
 async function updateSessionExternalUrl(
