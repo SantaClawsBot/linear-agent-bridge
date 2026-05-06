@@ -51,6 +51,30 @@ import { cleanupSession } from "../agent/plan-manager.js";
 import { hasPostedResponse, clearResponseFlag } from "../agent/response-tracker.js";
 import { captureBaseUrl } from "../api/base-url.js";
 
+async function markSessionCompleted(
+  api: OpenClawPluginApi,
+  cfg: PluginConfig,
+  session: string,
+): Promise<void> {
+  if (!session) return;
+  try {
+    const result = await callLinear(api, cfg, "agentSessionUpdate(completed)", {
+      query: SESSION_UPDATE_MUTATION,
+      variables: { id: session, input: { status: "completed" } },
+    });
+    if (result.ok) {
+      const root = readObject(result.data?.agentSessionUpdate);
+      if (root?.success === true) {
+        api.logger.info?.(`linear: session marked completed, session=${session.slice(0, 8)}...`);
+        return;
+      }
+    }
+    api.logger.warn?.(`linear: failed to mark session completed, session=${session.slice(0, 8)}...`);
+  } catch (err) {
+    api.logger.warn?.(`linear: error marking session completed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 const callRef: { value?: (opts: Record<string, unknown>) => Promise<unknown> } = {};
 
 const MAX_BODY = 2 * 1024 * 1024;
@@ -393,6 +417,11 @@ async function handleAgentEvent(
         }).catch(() => {});
       }
 
+      // Mark the session as completed in Linear
+      if (session) {
+        markSessionCompleted(api, cfg, session).catch(() => {});
+      }
+
       // If the agent explicitly posted a response via the API, skip auto-post.
       if (session && hasPostedResponse(session)) {
         clearResponseFlag(session);
@@ -419,6 +448,9 @@ async function handleAgentEvent(
     }).catch((postErr) => {
       api.logger.warn?.(`linear: failed to post error to Linear: ${postErr instanceof Error ? postErr.message : String(postErr)}`);
     });
+    if (session) {
+      markSessionCompleted(api, cfg, session).catch(() => {});
+    }
   }
 }
 
