@@ -46,6 +46,7 @@ import { isCloseIntentPrompt, closeIssueFromPrompt } from "./close-intent.js";
 import { shouldSkipPromptedRun, isSelfAuthoredComment } from "./skip-filter.js";
 import { createSessionToken, revokeSessionToken } from "../agent/session-token.js";
 import { buildEnrichedMessage } from "../agent/context-builder.js";
+import { autolinkPRToIssue } from "../api/pr-ops.js";
 import { cleanupSession } from "../agent/plan-manager.js";
 import { hasPostedResponse, clearResponseFlag } from "../agent/response-tracker.js";
 import { captureBaseUrl } from "../api/base-url.js";
@@ -380,6 +381,17 @@ async function handleAgentEvent(
       if (session) cleanupSession(session);
 
       api.logger.info?.(`linear: agent run done, session=${session ? session.slice(0, 8) + "..." : "(none)"}, hasResponse=${Boolean(hasPostedResponse(session))}, textLen=${agentText?.length ?? 0}`);
+
+      // Auto-detect and link any PRs created during the agent run
+      if (session && repo) {
+        autolinkPRToIssue(api, cfg, {
+          sessionId: session,
+          issueId,
+          issueIdentifier: id,
+          issueTitle: title,
+          repoDir: repo,
+        }).catch(() => {});
+      }
 
       // If the agent explicitly posted a response via the API, skip auto-post.
       if (session && hasPostedResponse(session)) {

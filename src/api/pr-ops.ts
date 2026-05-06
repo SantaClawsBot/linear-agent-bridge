@@ -412,3 +412,81 @@ async function cleanupWorktree(
     }
   }
 }
+
+// Auto-detect and link PRs to Linear issue after agent run
+export async function autolinkPRToIssue(
+  api: OpenClawPluginApi,
+  cfg: import("../types.js").PluginConfig,
+  context: {
+    sessionId: string;
+    issueId: string;
+    issueIdentifier: string;
+    issueTitle: string;
+    repoDir: string;
+  },
+): Promise<void> {
+  const { repoDir, issueIdentifier, issueTitle } = context;
+  if (!repoDir) return;
+
+  try {
+    // Check for worktree or in-repo branches matching the issue
+    const slug = issueIdentifier.toLowerCase().replace(/[^a-z0-9-]+/g, "-");
+    const titleSlug = issueTitle
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+/, "")
+      .replace(/-+$/, "")
+      .slice(0, 48);
+    const branchPattern = `${slug}`;
+
+    // List recent PRs and find one matching our branch
+    const { stdout } = await gh(
+      ["pr", "list", "--state", "open", "--json", "number,url,headRefName,title", "--limit", "10"],
+      repoDir,
+    ).catch(() => ({ stdout: "[]", stderr: "" }));
+
+    const prs = JSON.parse(stdout || "[]") as Array<{
+      number: number;
+      url: string;
+      headRefName: string;
+      title: string;
+    }>;
+
+    // Find a PR whose branch name contains the issue identifier slug
+    const matchingPR = prs.find(
+      (pr) =>
+        pr.headRefName.toLowerCase().includes(branchPattern) ||
+        pr.title.toLowerCase().includes(issueIdentifier.toLowerCase()),
+    );
+
+    if (!matchingPR) return;
+
+    api.logger.info?.(
+      `linear: auto-linking PR #${matchingPR.number} (${matchingPR.url}) to session=${context.sessionId?.slice(0, 8)}...`,
+    );
+
+    // Link as external URL on the session
+    await callLinear(api, cfg, "agentSessionUpdate(prUrl)", {
+      query: SESSION_UPDATE_MUTATION,
+      variables: {
+        id: context.sessionId,
+        input: {
+          addedExternalUrls: [{ label: `PR #${matchingPR.number}`, url: matchingPR.url }],
+        },
+      },
+    }).catch(() => {});
+
+    // Post as activity
+    await postActivity(api, cfg, context.sessionId, {
+      type: "action",
+      action: "opened",
+      parameter: "pull request",
+      result: `[${matchingPR.title}](${matchingPR.url})`,
+    }).catch(() => {});
+  } catch (err) {
+    // Non-critical — don't fail the whole handler
+    const msg = err instanceof Error ? err.message : String(err);
+    api.logger.info?.(`linear: auto-link PR skipped: ${msg}`);
+  }
+}
