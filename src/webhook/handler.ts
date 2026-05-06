@@ -396,15 +396,57 @@ async function handleAgentEvent(
       } catch (dispatchErr) {
         const dispatchMsg = dispatchErr instanceof Error ? dispatchErr.message : String(dispatchErr);
         api.logger.warn?.(`linear: callGateway dispatch failed (${dispatchMsg})`);
+        agentError = dispatchMsg;
       }
 
-
-      // Agent completed — post response to Linear
+      // ── Cleanup ──
       if (session) inflightSessions.delete(session);
       if (apiToken) revokeSessionToken(apiToken);
       if (session) cleanupSession(session);
 
-      api.logger.info?.(`linear: agent run done, session=${session ? session.slice(0, 8) + "..." : "(none)"}, hasResponse=${Boolean(hasPostedResponse(session))}, textLen=${agentText?.length ?? 0}`);
+      const hasAgentResponse = session && hasPostedResponse(session);
+      api.logger.info?.(`linear: agent run done, session=${session ? session.slice(0, 8) + "..." : "(none)"}, hasResponse=${Boolean(hasAgentResponse)}, error=${Boolean(agentError)}, textLen=${agentText?.length ?? 0}`);
+
+      // If the agent explicitly posted a response via the API, skip auto-post.
+      if (hasAgentResponse) {
+        clearResponseFlag(session);
+        // Still run post-completion tasks
+        if (session && repo) {
+          autolinkPRToIssue(api, cfg, {
+            sessionId: session,
+            issueId,
+            issueIdentifier: id,
+            issueTitle: title,
+            repoDir: repo,
+          }).catch((e) => api.logger.warn?.(`linear: autolinkPR failed: ${e instanceof Error ? e.message : String(e)}`));
+        }
+        if (session) {
+          markSessionCompleted(api, cfg, session).catch((e) => api.logger.warn?.(`linear: markSessionCompleted failed: ${e instanceof Error ? e.message : String(e)}`));
+        }
+        return;
+      }
+
+      // ── Post agent response or error to Linear ──
+      if (agentError) {
+        // Dispatch itself failed — post error activity
+        api.logger.info?.(`linear: posting dispatch error to Linear, session=${session ? session.slice(0, 8) + "..." : "(none)"}`);
+        await postActivity(api, cfg, session, {
+          type: "error",
+          body: `Agent dispatch failed: ${agentError}`,
+        }).catch((e) => api.logger.warn?.(`linear: failed to post error to Linear: ${e instanceof Error ? e.message : String(e)}`));
+      } else if (agentText && agentText !== "Agent completed with no reply.") {
+        api.logger.info?.(`linear: posting agent response to Linear, session=${session ? session.slice(0, 8) + "..." : "(none)"}, textLen=${agentText.length}`);
+        await postActivity(api, cfg, session, { type: "response", body: agentText }).catch((e) => api.logger.warn?.(`linear: failed to post response to Linear: ${e instanceof Error ? e.message : String(e)}`));
+      } else {
+        // Agent completed with no text — post a minimal response so the user sees completion
+        api.logger.info?.(`linear: agent returned empty response, posting minimal response, session=${session ? session.slice(0, 8) + "..." : "(none)"}`);
+        await postActivity(api, cfg, session, {
+          type: "response",
+          body: "Done — no further output from the agent.",
+        }).catch((e) => api.logger.warn?.(`linear: failed to post minimal response: ${e instanceof Error ? e.message : String(e)}`));
+      }
+
+      // ── Post-completion tasks (after response is posted) ──
 
       // Auto-detect and link any PRs created during the agent run
       if (session && repo) {
@@ -414,26 +456,13 @@ async function handleAgentEvent(
           issueIdentifier: id,
           issueTitle: title,
           repoDir: repo,
-        }).catch(() => {});
+        }).catch((e) => api.logger.warn?.(`linear: autolinkPR failed: ${e instanceof Error ? e.message : String(e)}`));
       }
 
       // Mark the session as completed in Linear
       if (session) {
-        markSessionCompleted(api, cfg, session).catch(() => {});
+        markSessionCompleted(api, cfg, session).catch((e) => api.logger.warn?.(`linear: markSessionCompleted failed: ${e instanceof Error ? e.message : String(e)}`));
       }
-
-      // If the agent explicitly posted a response via the API, skip auto-post.
-      if (session && hasPostedResponse(session)) {
-        clearResponseFlag(session);
-        return;
-      }
-
-      // Post the agent's response to Linear
-      if (!agentText || agentText === "Agent completed with no reply.") return;
-      api.logger.info?.(`linear: posting agent response to Linear (strategy 2), session=${session ? session.slice(0, 8) + "..." : "(none)"}, textLen=${agentText.length}`);
-      postActivity(api, cfg, session, { type: "response", body: agentText }).catch((postErr) => {
-        api.logger.warn?.(`linear: failed to post response to Linear (strategy 2): ${postErr instanceof Error ? postErr.message : String(postErr)}`);
-      });
     }
   } catch (err) {
     if (session) inflightSessions.delete(session);
@@ -449,7 +478,7 @@ async function handleAgentEvent(
       api.logger.warn?.(`linear: failed to post error to Linear: ${postErr instanceof Error ? postErr.message : String(postErr)}`);
     });
     if (session) {
-      markSessionCompleted(api, cfg, session).catch(() => {});
+      markSessionCompleted(api, cfg, session).catch((e) => api.logger.warn?.(`linear: markSessionCompleted failed: ${e instanceof Error ? e.message : String(e)}`));
     }
   }
 }
