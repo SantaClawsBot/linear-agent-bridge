@@ -109,20 +109,25 @@ registerApiHandler(
     const worktreeDir = path.join(worktreesRoot, worktreeName);
 
     try {
-      // Fetch latest
+      // Fetch latest from origin
       await git(["fetch", "origin"], repoDir).catch(() => {});
 
-      // Determine the starting ref
-      const startRef = baseBranch ? `origin/${baseBranch}` : "HEAD";
+      // Determine the starting ref — default to origin/main, not stale HEAD
+      const startRef = baseBranch ? `origin/${baseBranch}` : "origin/main";
 
       // Check if worktree already exists
       const worktreeExists = fs.existsSync(path.join(worktreeDir, ".git"));
 
       if (worktreeExists) {
-        // Reuse existing worktree — just make sure we're on the right branch
+        // Reuse existing worktree — pull latest from origin and rebase
         api.logger.info?.(`linear pr/branch: reusing existing worktree at ${worktreeDir}`);
         try {
+          await git(["fetch", "origin"], worktreeDir).catch(() => {});
           await git(["checkout", branch], worktreeDir);
+          // Rebase onto latest origin/main to pick up upstream changes
+          await git(["rebase", startRef], worktreeDir).catch(() => {
+            api.logger.info?.(`linear pr/branch: rebase failed, continuing on current branch`);
+          });
         } catch {
           // Branch might not exist yet — create it
           await git(["checkout", "-b", branch, startRef], worktreeDir);
