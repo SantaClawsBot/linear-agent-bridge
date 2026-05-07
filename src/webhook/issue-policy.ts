@@ -8,12 +8,14 @@ import {
   ISSUE_INFO_QUERY,
   TEAM_STARTED_QUERY,
   TEAM_COMPLETED_QUERY,
+  TEAM_REVIEW_QUERY,
 } from "../graphql/queries.js";
 import { ISSUE_UPDATE_MUTATION } from "../graphql/mutations.js";
 import { readArray, readNumber, readObject, readString, resolveFlag } from "../util.js";
 
 const stateRef: Record<string, string> = {};
 const completedStateRef: Record<string, string> = {};
+const reviewStateRef: Record<string, string> = {};
 
 export async function applyIssuePolicy(
   api: OpenClawPluginApi,
@@ -132,6 +134,37 @@ export async function resolveCompletedState(
   if (!picked) return "";
   completedStateRef[teamId] = picked;
   return picked;
+}
+
+export async function resolveReviewState(
+  api: OpenClawPluginApi,
+  cfg: PluginConfig,
+  teamId: string,
+): Promise<string> {
+  if (!teamId) return "";
+  const cached = reviewStateRef[teamId];
+  if (cached) return cached;
+  const result = await callLinear(api, cfg, "team(review-states)", {
+    query: TEAM_REVIEW_QUERY,
+    variables: { id: teamId },
+  });
+  if (!result.ok) return "";
+  const team = readObject(result.data!.team);
+  const states = readObject(team?.states);
+  const nodes = readArray(states?.nodes);
+  // Find the state whose name contains "review" (case-insensitive)
+  for (const node of nodes) {
+    const item = readObject(node);
+    const name = readString(item?.name) ?? "";
+    if (name.toLowerCase().includes("review")) {
+      const id = readString(item?.id) ?? "";
+      if (id) {
+        reviewStateRef[teamId] = id;
+        return id;
+      }
+    }
+  }
+  return "";
 }
 
 function pickLowestPosition(nodes: unknown[]): string {

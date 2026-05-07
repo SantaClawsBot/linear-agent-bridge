@@ -42,7 +42,7 @@ import {
   resolveExternal,
 } from "./message-builder.js";
 import { buildAgentResponse } from "./response-parser.js";
-import { applyIssuePolicy, resolveCompletedState, resolveIssueInfo, updateIssue } from "./issue-policy.js";
+import { applyIssuePolicy, resolveReviewState, resolveIssueInfo, updateIssue } from "./issue-policy.js";
 import { isCloseIntentPrompt, closeIssueFromPrompt } from "./close-intent.js";
 import { shouldSkipPromptedRun, isSelfAuthoredComment } from "./skip-filter.js";
 import { createSessionToken, revokeSessionToken } from "../agent/session-token.js";
@@ -89,16 +89,16 @@ async function autoCloseIssue(
     if (!info) return;
     if (info.stateType === "completed" || info.stateType === "canceled") return;
     if (!info.teamId) return;
-    const stateId = await resolveCompletedState(api, cfg, info.teamId);
+    const stateId = await resolveReviewState(api, cfg, info.teamId);
     if (!stateId) return;
     const ok = await updateIssue(api, cfg, info.id, { stateId }, "issueUpdate(autoClose)");
     if (ok) {
-      api.logger.info?.(`linear: auto-closed issue ${issueId.slice(0, 8)}...`);
+      api.logger.info?.(`linear: auto-moved issue to review ${issueId.slice(0, 8)}...`);
     } else {
-      api.logger.warn?.(`linear: failed to auto-close issue ${issueId.slice(0, 8)}...`);
+      api.logger.warn?.(`linear: failed to auto-move issue to review ${issueId.slice(0, 8)}...`);
     }
   } catch (err) {
-    api.logger.warn?.(`linear: error auto-closing issue: ${err instanceof Error ? err.message : String(err)}`);
+    api.logger.warn?.(`linear: error auto-moving issue to review: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 

@@ -156,3 +156,13 @@ export const ISSUE_BY_IDENTIFIER_QUERY = `
     }
   }
 `;
+
+export const TEAM_REVIEW_QUERY = `
+  query TeamReviewStates($id: String!) {
+    team(id: $id) {
+      states {
+        nodes { id name position }
+      }
+    }
+  }
+`;
