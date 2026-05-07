@@ -55,6 +55,8 @@ export interface PluginConfig {
   acpAgent?: string;
   /** Disable ACP dispatch and always use in-process runtime */
   disableAcp?: boolean;
+  /** Auto-close issue to "completed" when agent finishes successfully on a "created" action (default: true) */
+  closeOnComplete?: boolean;
 }
 
 

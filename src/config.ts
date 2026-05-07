@@ -31,6 +31,7 @@ export function normalizeCfg(
     branchPrefix: readCfgString(cfg, "branchPrefix"),
     prReportToLinear: readCfgBool(cfg, "prReportToLinear"),
     githubWebhookSecret: readCfgString(cfg, "githubWebhookSecret"),
+    closeOnComplete: readCfgBool(cfg, "closeOnComplete"),
   };
 }
 

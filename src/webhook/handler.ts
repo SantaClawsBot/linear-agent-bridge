@@ -19,6 +19,7 @@ import {
   readString,
   normalizeKey,
   sendJson,
+  resolveFlag,
 } from "../util.js";
 import { verifySignature } from "./validation.js";
 import {
@@ -41,7 +42,7 @@ import {
   resolveExternal,
 } from "./message-builder.js";
 import { buildAgentResponse } from "./response-parser.js";
-import { applyIssuePolicy } from "./issue-policy.js";
+import { applyIssuePolicy, resolveCompletedState, resolveIssueInfo, updateIssue } from "./issue-policy.js";
 import { isCloseIntentPrompt, closeIssueFromPrompt } from "./close-intent.js";
 import { shouldSkipPromptedRun, isSelfAuthoredComment } from "./skip-filter.js";
 import { createSessionToken, revokeSessionToken } from "../agent/session-token.js";
@@ -76,6 +77,30 @@ async function markSessionCompleted(
 }
 
 const callRef: { value?: (opts: Record<string, unknown>) => Promise<unknown> } = {};
+
+async function autoCloseIssue(
+  api: OpenClawPluginApi,
+  cfg: PluginConfig,
+  issueId: string,
+): Promise<void> {
+  if (!issueId) return;
+  try {
+    const info = await resolveIssueInfo(api, cfg, issueId);
+    if (!info) return;
+    if (info.stateType === "completed" || info.stateType === "canceled") return;
+    if (!info.teamId) return;
+    const stateId = await resolveCompletedState(api, cfg, info.teamId);
+    if (!stateId) return;
+    const ok = await updateIssue(api, cfg, info.id, { stateId }, "issueUpdate(autoClose)");
+    if (ok) {
+      api.logger.info?.(`linear: auto-closed issue ${issueId.slice(0, 8)}...`);
+    } else {
+      api.logger.warn?.(`linear: failed to auto-close issue ${issueId.slice(0, 8)}...`);
+    }
+  } catch (err) {
+    api.logger.warn?.(`linear: error auto-closing issue: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
 
 const MAX_BODY = 2 * 1024 * 1024;
 const AGENT_TIMEOUT_MS = 30 * 60 * 1000;
@@ -423,6 +448,10 @@ async function handleAgentEvent(
         if (session) {
           markSessionCompleted(api, cfg, session).catch((e) => api.logger.warn?.(`linear: markSessionCompleted failed: ${e instanceof Error ? e.message : String(e)}`));
         }
+        // Auto-close issue if agent ran on a "created" action and completed without error
+        if (action === "created" && issueId && !agentError && resolveFlag(cfg.closeOnComplete, true)) {
+          autoCloseIssue(api, cfg, issueId).catch((e) => api.logger.warn?.(`linear: autoCloseIssue failed: ${e instanceof Error ? e.message : String(e)}`));
+        }
         return;
       }
 
@@ -462,6 +491,11 @@ async function handleAgentEvent(
       // Mark the session as completed in Linear
       if (session) {
         markSessionCompleted(api, cfg, session).catch((e) => api.logger.warn?.(`linear: markSessionCompleted failed: ${e instanceof Error ? e.message : String(e)}`));
+      }
+
+      // Auto-close issue if agent ran on a "created" action and completed without error
+      if (action === "created" && issueId && !agentError && resolveFlag(cfg.closeOnComplete, true)) {
+        autoCloseIssue(api, cfg, issueId).catch((e) => api.logger.warn?.(`linear: autoCloseIssue failed: ${e instanceof Error ? e.message : String(e)}`));
       }
     }
   } catch (err) {

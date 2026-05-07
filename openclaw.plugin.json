@@ -118,6 +118,10 @@
       "githubWebhookSecret": {
         "type": "string",
         "description": "GitHub webhook secret for verifying PR review event signatures"
+      },
+      "closeOnComplete": {
+        "type": "boolean",
+        "description": "Auto-close issue to 'completed' when agent finishes successfully on a 'created' action (default: true)"
       }
     }
   },
@@ -190,6 +194,10 @@
     "githubWebhookSecret": {
       "label": "GitHub webhook secret",
       "sensitive": true
+    },
+    "closeOnComplete": {
+      "label": "Auto-close issue on agent completion",
+      "description": "Automatically move issue to 'completed' when agent finishes successfully on a 'created' action (default: true)"
     }
   }
 }
