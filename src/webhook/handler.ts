@@ -189,7 +189,7 @@ async function handleWebhook(
     logEvent(api, "notification", data);
     return;
   }
-  if (kind === "Comment" && (await isSelfAuthoredComment(api, cfg, data))) {
+  if (await isSelfAuthoredComment(api, cfg, data)) {
     return;
   }
   const sessionId = await resolveSessionIdWithFallback(api, cfg, data);
