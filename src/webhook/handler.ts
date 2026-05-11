@@ -61,7 +61,7 @@ async function markSessionCompleted(
   try {
     const result = await callLinear(api, cfg, "agentSessionUpdate(completed)", {
       query: SESSION_UPDATE_MUTATION,
-      variables: { id: session, input: { status: "completed" } },
+      variables: { id: session, input: { isCompleted: true } },
     });
     if (result.ok) {
       const root = readObject(result.data?.agentSessionUpdate);
