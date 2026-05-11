@@ -4,7 +4,7 @@ import { postActivity } from "../webhook/handler.js";
 import { SESSION_UPDATE_MUTATION } from "../graphql/mutations.js";
 import { readString, readObject, sendJson } from "../util.js";
 import type { OpenClawPluginApi } from "../types.js";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import fs from "node:fs";
 import path from "node:path";
@@ -495,3 +495,150 @@ export async function autolinkPRToIssue(
     api.logger.info?.(`linear: auto-link PR skipped: ${msg}`);
   }
 }
+
+// ---------------------------------------------------------------------------
+// PR Review via Claude CLI (pr-review-toolkit:review-pr)
+// ---------------------------------------------------------------------------
+
+/**
+ * Run Claude Code PR review in the given repo directory.
+ * Works on local git diff — no PR needs to exist.
+ * Returns the full review output text synchronously so the caller can act on it.
+ */
+async function runClaudePrReview(
+  repoDir: string,
+  options?: { aspects?: string[]; timeoutMs?: number },
+): Promise<{ ok: boolean; output: string; error?: string }> {
+  const aspects = options?.aspects?.length ? options.aspects.join(" ") : "";
+  const prompt = `/pr-review-toolkit:review-pr ${aspects}`.trim();
+  const timeoutMs = options?.timeoutMs ?? 10 * 60 * 1000; // 10 min default
+
+  return new Promise((resolve) => {
+    const args = [
+      "-p",
+      "--permission-mode", "bypassPermissions",
+      "--output-format", "text",
+      "--no-session-persistence",
+      prompt,
+    ];
+
+    const child = spawn("claude", args, {
+      cwd: repoDir,
+      env: { ...process.env },
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: timeoutMs,
+      killSignal: "SIGKILL",
+    });
+
+    const chunks: Buffer[] = [];
+    const errChunks: Buffer[] = [];
+
+    child.stdout.on("data", (c: Buffer) => chunks.push(c));
+    child.stderr.on("data", (c: Buffer) => errChunks.push(c));
+
+    child.on("close", (code) => {
+      const output = Buffer.concat(chunks).toString("utf8").trim();
+      const errOutput = Buffer.concat(errChunks).toString("utf8").trim();
+
+      if (code === 0 && output) {
+        resolve({ ok: true, output });
+      } else {
+        resolve({
+          ok: false,
+          output: output || "(no output)",
+          error: errOutput || `claude exited with code ${code}`,
+        });
+      }
+    });
+
+    child.on("error", (err) => {
+      resolve({ ok: false, output: "", error: err.message });
+    });
+  });
+}
+
+/**
+ * POST /pr/review — synchronous PR review via Claude Code.
+ *
+ * Reviews the local diff (committed changes on the current branch vs base).
+ * No PR needs to exist yet — this is for pre-push review cycles.
+ *
+ * The agent calls this, gets the review back in the JSON response,
+ * then decides whether to fix issues, commit, and re-review.
+ *
+ * Recommended workflow:
+ *   1. pr/branch  →  create branch
+ *   2. exec      →  write code
+ *   3. pr/commit →  stage + commit
+ *   4. pr/review →  get review (repeat 2-4 until clean)
+ *   5. pr/create →  push + open PR
+ */
+registerApiHandler(
+  "/pr/review",
+  async ({ api, cfg, context, body, res }) => {
+    const effectiveDir = context.repoDir ? getEffectiveDir(context) : "";
+    if (!effectiveDir) {
+      sendJson(res, 400, { ok: false, error: "No repo directory configured for this issue" });
+      return;
+    }
+
+    const rawAspects = Array.isArray(body.aspects)
+      ? body.aspects.filter((a): a is string => typeof a === "string")
+      : [];
+    const maxRounds = typeof body.maxRounds === "number" && body.maxRounds > 0
+      ? Math.min(body.maxRounds, 5)
+      : 1;
+
+    // Let Linear know a review is running (ephemeral — replaced by next activity)
+    if (context.sessionId) {
+      postActivity(api, cfg, context.sessionId, {
+        type: "thought",
+        body: `🔍 Running PR review...`,
+      }, { ephemeral: true }).catch(() => {});
+    }
+
+    // Run review rounds
+    const reviews: Array<{ round: number; ok: boolean; output: string; error?: string }> = [];
+
+    for (let round = 1; round <= maxRounds; round++) {
+      const result = await runClaudePrReview(effectiveDir, { aspects: rawAspects });
+      reviews.push({ round, ...result });
+
+      if (!result.ok) break;
+
+      // Heuristic: if review doesn't flag critical/important issues, consider it clean
+      const o = result.output.toLowerCase();
+      const hasIssues =
+        (o.includes("critical") && !o.includes("0 critical") && !o.includes("no critical")) ||
+        (o.includes("important") && !o.includes("0 important") && !o.includes("no important")) ||
+        o.includes("must fix") || o.includes("should fix");
+
+      if (!hasIssues) break;
+    }
+
+    const lastReview = reviews[reviews.length - 1];
+    const allPassed = reviews.every((r) => r.ok);
+
+    // Brief status to Linear — agent gets the full text in the response
+    if (context.sessionId && lastReview) {
+      await postActivity(api, cfg, context.sessionId, {
+        type: "action",
+        action: allPassed ? "reviewed" : "review-failed",
+        parameter: `local diff (${reviews.length} round${reviews.length > 1 ? "s" : ""})`,
+        result: allPassed ? "✅ Code review passed" : `⚠️ Review found issues — see agent log`,
+      }).catch(() => {});
+    }
+
+    // Full review text goes back to the agent only
+    sendJson(res, 200, {
+      ok: allPassed,
+      rounds: reviews.length,
+      reviews: reviews.map((r) => ({
+        round: r.round,
+        ok: r.ok,
+        ...(r.error ? { error: r.error } : {}),
+        output: r.output,
+      })),
+    });
+  },
+);

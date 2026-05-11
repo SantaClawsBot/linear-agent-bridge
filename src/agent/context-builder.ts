@@ -156,6 +156,24 @@ If a worktree is active for this issue, ${BT}worktree${BT} field contains its pa
 { action: "pr/cleanup" }
 Removes the isolated worktree directory. Called automatically after PR creation.
 
+**action: "pr/review"** — Run a Claude Code PR review on your local diff (synchronous)
+{ action: "pr/review", aspects?: ["code", "errors"], maxRounds?: 2 }
+Runs the ${BT}pr-review-toolkit:review-pr${BT} skill via Claude Code on the committed changes in your worktree vs the base branch.
+**No PR needs to exist yet** — this reviews your local diff before you push.
+Returns the full review text in the JSON response so you can act on it (fix issues, re-commit, re-review).
+Linear only sees a brief ✅/⚠️ status — the full review is between you and the caller.
+${BT}aspects${BT} is optional: ${BT}["comments", "tests", "errors", "types", "code", "simplify"]${BT}. Default: all aspects.
+${BT}maxRounds${BT} is optional (1-5, default 1). When >1, re-runs review until it passes clean or max is reached.
+
+**Recommended pre-push workflow:**
+${codeBlock("", [
+  "1. pr/branch   → create branch",
+  "2. exec        → write code",
+  "3. pr/commit   → stage + commit",
+  "4. pr/review   → get review (repeat 2-4 until clean)",
+  "5. pr/create   → push + open PR",
+].join("\n"))}
+
 **Important:** If no repo directory is configured (see "Repo directory" above), the PR actions will fail. Ensure the plugin config has ${BT}defaultDir${BT}, ${BT}repoByTeam${BT}, or ${BT}repoByProject${BT} set.`);
 
   // Progress & Tips
