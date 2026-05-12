@@ -52,30 +52,6 @@ import { cleanupSession } from "../agent/plan-manager.js";
 import { hasPostedResponse, clearResponseFlag } from "../agent/response-tracker.js";
 import { captureBaseUrl } from "../api/base-url.js";
 
-async function markSessionCompleted(
-  api: OpenClawPluginApi,
-  cfg: PluginConfig,
-  session: string,
-): Promise<void> {
-  if (!session) return;
-  try {
-    const result = await callLinear(api, cfg, "agentSessionUpdate(completed)", {
-      query: SESSION_UPDATE_MUTATION,
-      variables: { id: session, input: { isCompleted: true } },
-    });
-    if (result.ok) {
-      const root = readObject(result.data?.agentSessionUpdate);
-      if (root?.success === true) {
-        api.logger.info?.(`linear: session marked completed, session=${session.slice(0, 8)}...`);
-        return;
-      }
-    }
-    api.logger.warn?.(`linear: failed to mark session completed, session=${session.slice(0, 8)}...`);
-  } catch (err) {
-    api.logger.warn?.(`linear: error marking session completed: ${err instanceof Error ? err.message : String(err)}`);
-  }
-}
-
 const callRef: { value?: (opts: Record<string, unknown>) => Promise<unknown> } = {};
 
 async function autoCloseIssue(
@@ -445,9 +421,6 @@ async function handleAgentEvent(
             repoDir: repo,
           }).catch((e) => api.logger.warn?.(`linear: autolinkPR failed: ${e instanceof Error ? e.message : String(e)}`));
         }
-        if (session) {
-          markSessionCompleted(api, cfg, session).catch((e) => api.logger.warn?.(`linear: markSessionCompleted failed: ${e instanceof Error ? e.message : String(e)}`));
-        }
         // Auto-close issue if agent ran on a "created" action and completed without error
         if (action === "created" && issueId && !agentError && resolveFlag(cfg.closeOnComplete, true)) {
           autoCloseIssue(api, cfg, issueId).catch((e) => api.logger.warn?.(`linear: autoCloseIssue failed: ${e instanceof Error ? e.message : String(e)}`));
@@ -488,11 +461,6 @@ async function handleAgentEvent(
         }).catch((e) => api.logger.warn?.(`linear: autolinkPR failed: ${e instanceof Error ? e.message : String(e)}`));
       }
 
-      // Mark the session as completed in Linear
-      if (session) {
-        markSessionCompleted(api, cfg, session).catch((e) => api.logger.warn?.(`linear: markSessionCompleted failed: ${e instanceof Error ? e.message : String(e)}`));
-      }
-
       // Auto-close issue if agent ran on a "created" action and completed without error
       if (action === "created" && issueId && !agentError && resolveFlag(cfg.closeOnComplete, true)) {
         autoCloseIssue(api, cfg, issueId).catch((e) => api.logger.warn?.(`linear: autoCloseIssue failed: ${e instanceof Error ? e.message : String(e)}`));
@@ -511,9 +479,6 @@ async function handleAgentEvent(
     }).catch((postErr) => {
       api.logger.warn?.(`linear: failed to post error to Linear: ${postErr instanceof Error ? postErr.message : String(postErr)}`);
     });
-    if (session) {
-      markSessionCompleted(api, cfg, session).catch((e) => api.logger.warn?.(`linear: markSessionCompleted failed: ${e instanceof Error ? e.message : String(e)}`));
-    }
   }
 }
 
