@@ -205,7 +205,19 @@ ${codeBlock("json", '{ action: "activity/action", activityAction: "reading", par
 - Reference issues via URLs: https://linear.app/TEAM/issue/IDENTIFIER — they render as mentions
 - Do not use web_fetch or web_search for URLs containing "/resources/articles" (skip those links)
 - Use elicitation with the "select" signal to present options to the user
-- Post a response activity when your work is complete`);
+- Post a response activity when your work is complete
+
+### Context Budget — CRITICAL
+
+You have a limited context window. Large sessions crash with context overflow. Follow these rules:
+
+1. **Prefer ${BT}exec${BT} with ${BT}head -n 50${BT} or ${BT}tail -n 50${BT}** over reading entire files.
+2. **Use ${BT}grep${BT}, ${BT}rg${BT}, or ${BT}sed -n '10,30p'${BT}** to read specific sections, not whole files.
+3. **Pipe commands through ${BT}head -n 30${BT}** to cap output (e.g. ${BT}npm test 2>&1 | tail -20${BT}).
+4. **Never ${BT}cat${BT} a file larger than 50 lines** — use ${BT}wc -l${BT} first to check, then read targeted ranges.
+5. **Summarize before moving on** — if a tool result is large, don't carry it forward in your reasoning.
+6. **Prefer editing over reading** — make targeted edits with line-based replacements instead of reading→editing→writing.
+7. **Finish in as few turns as possible** — aim for ≤30 tool calls total.`);
 
   return [baseMessage, ...sections].join("\n\n---\n\n");
 }
