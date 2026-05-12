@@ -134,6 +134,47 @@ function buildExecPhaseMessage(plan: string): string {
   ].join("\n");
 }
 
+function buildCritiquePhaseMessage(plan: string): string {
+  return [
+    "You are a CODE REVIEWER (adversary). Another agent produced this implementation plan:",
+    "",
+    plan,
+    "",
+    "---",
+    "## INSTRUCTIONS — CRITIQUE PHASE",
+    "",
+    "Your job is to find flaws in this plan. Be ruthless. Check:",
+    "",
+    "1. **Missing files** — Did the plan miss any files that need changes? Spot-check imports, callers, tests.",
+    "2. **Wrong approach** — Is the proposed approach correct? Are there simpler or more idiomatic alternatives?",
+    "3. **Edge cases** — Does the plan handle error cases, empty states, null values, auth checks?",
+    "4. **Breaking changes** — Will the changes break existing functionality? Check types, exports, API contracts.",
+    "5. **Test coverage** — Are the proposed tests sufficient? Missing test cases?",
+    "",
+    "Read the files mentioned in the plan (use grep/head/tail — be concise). Verify the plan's assumptions.",
+    "",
+    "Output your critique in this format:",
+    "```",
+    "VERDICT: APPROVE or REVISE",
+    "",
+    "## Issues found (if any)",
+    "- [CRITICAL] description (file:line)",
+    "- [MAJOR] description",
+    "- [MINOR] description",
+    "",
+    "## Suggested changes to the plan",
+    "- Change step N to: ...",
+    "- Add step: ...",
+    "```",
+    "",
+    "If the plan is sound, output VERDICT: APPROVE with no changes needed.",
+    "If there are issues, output VERDICT: REVISE with specific corrections.",
+    "",
+    "Be concise. Target your reads — only check files the plan mentions or that are clearly related.",
+    "Call activity/response with your critique when done.",
+  ].join("\n");
+}
+
 function shouldUseMultiPhase(action: string, prompt: string): boolean {
   // Only use multi-phase for "created" actions (new issues) with substantial prompts
   // "prompted" (follow-ups) are usually shorter and don't need splitting
@@ -492,7 +533,47 @@ async function handleAgentEvent(
         if (!planText || planText.length < 50) {
           agentError = "Planning phase produced no useful output";
         } else {
-          // Phase 2: EXEC — execute the plan with fresh context
+          // Phase 2: CRITIQUE — adversarial review of the plan
+          const critiqueSessionKey = `${sessionKey}:critique`;
+          api.logger.info?.(`linear [phase=critique]: dispatching, sessionKey=${critiqueSessionKey}`);
+          postActivity(api, cfg, session, {
+            type: "thought",
+            body: "Reviewing plan for issues…",
+          }, { ephemeral: true }).catch(() => {});
+
+          let effectivePlan = planText;
+          try {
+            const critiqueResult = await call({
+              method: "agent",
+              params: {
+                message: buildCritiquePhaseMessage(planText),
+                sessionKey: critiqueSessionKey,
+                label: `${label} [critique]`,
+                idempotencyKey: `${idem}-critique`,
+              },
+              expectFinal: true,
+              timeoutMs: PHASE_TIMEOUT_MS,
+            });
+            const critiqueText = buildAgentResponse(critiqueResult);
+            api.logger.info?.(`linear [phase=critique]: completed, textLen=${critiqueText?.length ?? 0}`);
+
+            // If critique suggests revisions, fold them into the plan
+            if (critiqueText && critiqueText.includes("VERDICT: REVISE")) {
+              api.logger.info?.(`linear [phase=critique]: plan needs revision, merging critique`);
+              postActivity(api, cfg, session, {
+                type: "thought",
+                body: "Plan revised based on review feedback.",
+              }, { ephemeral: true }).catch(() => {});
+              effectivePlan = planText + "\n\n---\n## Critique Feedback (MUST ADDRESS)\n" + critiqueText;
+            } else {
+              api.logger.info?.(`linear [phase=critique]: plan approved`);
+            }
+          } catch (critiqueErr) {
+            // Critique failure is non-fatal — proceed with original plan
+            api.logger.warn?.(`linear [phase=critique]: failed, proceeding with original plan: ${critiqueErr instanceof Error ? critiqueErr.message : String(critiqueErr)}`);
+          }
+
+          // Phase 3: EXEC — execute the (possibly revised) plan with fresh context
           const execSessionKey = `${sessionKey}:exec`;
           api.logger.info?.(`linear [phase=exec]: dispatching, sessionKey=${execSessionKey}`);
           postActivity(api, cfg, session, {
@@ -511,8 +592,8 @@ async function handleAgentEvent(
                 repo, session, context,
                 compact: false,
                 apiBaseUrl: execApiBaseUrl, apiToken, issueId, teamId, repoDir: repo,
-              }) + "\n\n---\n" + buildExecPhaseMessage(planText)
-            : buildExecPhaseMessage(planText);
+              }) + "\n\n---\n" + buildExecPhaseMessage(effectivePlan)
+            : buildExecPhaseMessage(effectivePlan);
 
           const execResult = await call({
             method: "agent",
