@@ -47,7 +47,7 @@ import { isCloseIntentPrompt, closeIssueFromPrompt } from "./close-intent.js";
 import { shouldSkipPromptedRun, isSelfAuthoredComment } from "./skip-filter.js";
 import { createSessionToken, revokeSessionToken } from "../agent/session-token.js";
 import { buildEnrichedMessage } from "../agent/context-builder.js";
-import { autolinkPRToIssue } from "../api/pr-ops.js";
+import { autolinkPRToIssue, runClaudePrReview, getEffectiveDir } from "../api/pr-ops.js";
 import { cleanupSession } from "../agent/plan-manager.js";
 import { hasPostedResponse, clearResponseFlag } from "../agent/response-tracker.js";
 import { captureBaseUrl } from "../api/base-url.js";
@@ -173,6 +173,31 @@ function buildCritiquePhaseMessage(plan: string): string {
     "Be concise. Target your reads — only check files the plan mentions or that are clearly related.",
     "Call activity/response with your critique when done.",
   ].join("\n");
+}
+
+function buildFixPhaseMessage(reviewOutput: string): string {
+  return [
+    "You are in the FIX phase. A PR review found issues with your changes:",
+    "",
+    reviewOutput,
+    "",
+    "---",
+    "## INSTRUCTIONS — FIX PHASE",
+    "",
+    "Fix the issues listed above. Then commit the fixes.",
+    "Do NOT re-investigate or re-plan — just fix the specific issues.",
+    "",
+    "When done, post a response activity with a summary of what you fixed.",
+    "",
+    "Be concise in your tool usage.",
+  ].join("\n");
+}
+
+function truncateReview(output: string, maxChars = 8_000): string {
+  if (output.length <= maxChars) return output;
+  const head = output.slice(0, maxChars * 0.7);
+  const tail = output.slice(-maxChars * 0.3);
+  return `${head}\n\n... (truncated ${output.length - maxChars} chars) ...\n\n${tail}`;
 }
 
 function shouldUseMultiPhase(action: string, prompt: string): boolean {
@@ -608,6 +633,76 @@ async function handleAgentEvent(
           });
           agentText = buildAgentResponse(execResult);
           api.logger.info?.(`linear [phase=exec]: completed, textLen=${agentText?.length ?? 0}`);
+
+          // Phase 4: REVIEW — run claude pr/review on the diff, fix if needed
+          if (repo && !agentError) {
+            const effectiveDir = getEffectiveDir({ repoDir: repo, issueIdentifier: id, issueTitle: title });
+            if (effectiveDir) {
+              try {
+                api.logger.info?.(`linear [phase=review]: running PR review on ${effectiveDir}`);
+                postActivity(api, cfg, session, {
+                  type: "thought",
+                  body: "Running code review…",
+                }, { ephemeral: true }).catch(() => {});
+
+                const MAX_REVIEW_ROUNDS = 3;
+                for (let round = 1; round <= MAX_REVIEW_ROUNDS; round++) {
+                  const review = await runClaudePrReview(effectiveDir);
+                  api.logger.info?.(`linear [phase=review]: round ${round}, ok=${review.ok}, outputLen=${review.output.length}`);
+
+                  if (!review.ok) {
+                    api.logger.warn?.(`linear [phase=review]: review failed: ${review.error}`);
+                    break;
+                  }
+
+                  const reviewText = truncateReview(review.output);
+                  const hasIssues = /\b(critical|important|must.?fix|should.?fix)\b/i.test(reviewText)
+                    && !/\b(0 critical|no critical|no important)\b/i.test(reviewText);
+
+                  if (hasIssues && round < MAX_REVIEW_ROUNDS) {
+                    // Issues found — post status to Linear, dispatch fix agent
+                    postActivity(api, cfg, session, {
+                      type: "action",
+                      action: "reviewed",
+                      parameter: `round ${round}`,
+                      result: `⚠️ Issues found, fixing...`,
+                    }).catch(() => {});
+
+                    const fixSessionKey = `${sessionKey}:fix-${round}`;
+                    api.logger.info?.(`linear [phase=fix]: dispatching round ${round}, sessionKey=${fixSessionKey}`);
+
+                    const fixResult = await call({
+                      method: "agent",
+                      params: {
+                        message: buildFixPhaseMessage(reviewText),
+                        sessionKey: fixSessionKey,
+                        label: `${label} [fix-${round}]`,
+                        idempotencyKey: `${idem}-fix-${round}`,
+                      },
+                      expectFinal: true,
+                      timeoutMs: PHASE_TIMEOUT_MS,
+                    });
+                    const fixText = buildAgentResponse(fixResult);
+                    api.logger.info?.(`linear [phase=fix]: round ${round} completed, textLen=${fixText?.length ?? 0}`);
+                  } else {
+                    // Clean review or max rounds reached
+                    const verdict = hasIssues ? "issues remain (max rounds reached)" : "passed";
+                    postActivity(api, cfg, session, {
+                      type: "action",
+                      action: "reviewed",
+                      parameter: `${round} round${round > 1 ? "s" : ""}`,
+                      result: hasIssues ? "⚠️ Review complete (some issues remain)" : "✅ Code review passed",
+                    }).catch(() => {});
+                    api.logger.info?.(`linear [phase=review]: done — ${verdict}, rounds=${round}`);
+                    break;
+                  }
+                }
+              } catch (reviewErr) {
+                // Review failure is non-fatal
+                api.logger.warn?.(`linear [phase=review]: failed: ${reviewErr instanceof Error ? reviewErr.message : String(reviewErr)}`);
+              }
+            }
+          }
         }
       } else {
         // ── Single-phase dispatch (for prompted/follow-ups) ──

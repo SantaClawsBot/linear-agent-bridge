@@ -78,7 +78,7 @@ function resolveWorktreeDir(
  * Get the effective working directory for an issue session.
  * Uses worktree isolation if available, falls back to the base repo dir.
  */
-function getEffectiveDir(context: { repoDir: string; issueIdentifier: string; issueTitle: string }): string {
+export function getEffectiveDir(context: { repoDir: string; issueIdentifier: string; issueTitle: string }): string {
   return resolveWorktreeDir(context.repoDir, context.issueIdentifier, context.issueTitle);
 }
 
@@ -505,7 +505,7 @@ export async function autolinkPRToIssue(
  * Works on local git diff — no PR needs to exist.
  * Returns the full review output text synchronously so the caller can act on it.
  */
-async function runClaudePrReview(
+export async function runClaudePrReview(
   repoDir: string,
   options?: { aspects?: string[]; timeoutMs?: number },
 ): Promise<{ ok: boolean; output: string; error?: string }> {
