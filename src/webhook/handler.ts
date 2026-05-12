@@ -81,6 +81,65 @@ async function autoCloseIssue(
 const MAX_BODY = 2 * 1024 * 1024;
 const AGENT_TIMEOUT_MS = 30 * 60 * 1000;
 
+// Multi-phase dispatch: split work across sequential agent runs
+// to avoid context overflow on complex issues.
+const PHASE_TIMEOUT_MS = 10 * 60 * 1000; // 10 min per phase
+
+const PHASE_PLAN_PROMPT_SUFFIX = [
+  "",
+  "---",
+  "## INSTRUCTIONS — PLANNING PHASE",
+  "",
+  "You are in the PLANNING phase. Your job is to investigate the issue and produce a concrete implementation plan.",
+  "",
+  "1. Read relevant files to understand the codebase.",
+  "2. Identify exactly which files need to change and how.",
+  "3. Output a plan as a structured markdown block.",
+  "",
+  "IMPORTANT: When you are done, call the activity/response action with your plan. Do NOT implement anything yet.",
+  "Your plan will be handed to a fresh agent session for implementation.",
+  "",
+  "Use this format for your response:",
+  "```markdown",
+  "## Implementation Plan",
+  "### Files to modify",
+  "- `path/to/file.ts` — description of change",
+  "### Files to create  ",
+  "- `path/to/new-file.ts` — description",
+  "### Implementation steps",
+  "1. Step one (with enough detail that another agent can execute it)",
+  "2. Step two",
+  "...",
+  "### Testing",
+  "- How to verify the changes work",
+  "```",
+].join("\n");
+
+function buildExecPhaseMessage(plan: string): string {
+  return [
+    "You are in the EXECUTION phase. A previous agent investigated the issue and produced this plan:",
+    "",
+    plan,
+    "",
+    "---",
+    "## INSTRUCTIONS — EXECUTION PHASE",
+    "",
+    "Execute the plan above exactly. Do NOT re-investigate — the plan is authoritative.",
+    "1. Create branches, edit files, commit changes as needed.",
+    "2. Run tests to verify.",
+    "3. If a PR workflow is available, create the PR.",
+    "4. When done, post a response activity with a summary of what you did.",
+    "",
+    "Be concise in your tool usage — use targeted reads (grep, sed, head) not whole-file cats.",
+  ].join("\n");
+}
+
+function shouldUseMultiPhase(action: string, prompt: string): boolean {
+  // Only use multi-phase for "created" actions (new issues) with substantial prompts
+  // "prompted" (follow-ups) are usually shorter and don't need splitting
+  return action === "created";
+}
+
 // Guard against duplicate agent runs for the same session.
 // Linear sends both an AgentSessionEvent and a Comment webhook for the
 // same interaction; without dedup both trigger an agent run.
@@ -374,31 +433,103 @@ async function handleAgentEvent(
     //
     // Uses callGateway to dispatch the agent and wait for the result.
     // The webhook already returned 202 via queueMicrotask so we don't
-    // block HTTP. The event loop will be blocked during agent execution
-    // but recovers afterward.
+    // block HTTP.
     //
-    {
-      // Keepalive: post ephemeral thoughts to Linear so the session
-      // isn't marked "stopped responding" during long agent runs.
-      // Linear expects an activity within ~10s of session creation
-      // and periodically thereafter.
-      let keepaliveTimer: ReturnType<typeof setInterval> | undefined;
-      let keepaliveAlive = true;
-      if (session && enableApi) {
-        const KEEPALIVE_INTERVAL_MS = 8_000;
-        keepaliveTimer = setInterval(() => {
-          if (!keepaliveAlive) return;
+    // For "created" actions, uses multi-phase dispatch:
+    //   Phase 1 (PLAN): Agent investigates and produces a plan.
+    //   Phase 2 (EXEC): Fresh context executes the plan.
+    // Each phase gets its own sessionKey so the gateway creates
+    // a fresh agent session with clean context.
+    //
+    const useMultiPhase = shouldUseMultiPhase(action, prompt);
+
+    // Keepalive: post ephemeral thoughts to Linear so the session
+    // isn't marked "stopped responding" during long agent runs.
+    // Linear expects an activity within ~10s of session creation
+    // and periodically thereafter.
+    let keepaliveTimer: ReturnType<typeof setInterval> | undefined;
+    let keepaliveAlive = true;
+    if (session && enableApi) {
+      const KEEPALIVE_INTERVAL_MS = 8_000;
+      keepaliveTimer = setInterval(() => {
+        if (!keepaliveAlive) return;
+        postActivity(api, cfg, session, {
+          type: "thought",
+          body: "Working…",
+        }, { ephemeral: true }).catch(() => {});
+      }, KEEPALIVE_INTERVAL_MS);
+      if (keepaliveTimer.unref) keepaliveTimer.unref();
+    }
+
+    try {
+      const call = await loadCallGateway(api);
+
+      if (useMultiPhase) {
+        // ── Multi-phase dispatch ──
+
+        // Phase 1: PLAN — investigate and produce a plan
+        const planSessionKey = `${sessionKey}:plan`;
+        api.logger.info?.(`linear [phase=plan]: dispatching, sessionKey=${planSessionKey}`);
+        postActivity(api, cfg, session, {
+          type: "thought",
+          body: "Investigating issue and planning implementation…",
+        }, { ephemeral: true }).catch(() => {});
+
+        const planResult = await call({
+          method: "agent",
+          params: {
+            message: message + PHASE_PLAN_PROMPT_SUFFIX,
+            sessionKey: planSessionKey,
+            label: `${label} [plan]`,
+            idempotencyKey: `${idem}-plan`,
+          },
+          expectFinal: true,
+          timeoutMs: PHASE_TIMEOUT_MS,
+        });
+        const planText = buildAgentResponse(planResult);
+        api.logger.info?.(`linear [phase=plan]: completed, textLen=${planText?.length ?? 0}`);
+
+        if (!planText || planText.length < 50) {
+          agentError = "Planning phase produced no useful output";
+        } else {
+          // Phase 2: EXEC — execute the plan with fresh context
+          const execSessionKey = `${sessionKey}:exec`;
+          api.logger.info?.(`linear [phase=exec]: dispatching, sessionKey=${execSessionKey}`);
           postActivity(api, cfg, session, {
             type: "thought",
-            body: "Working…",
+            body: "Implementing the plan…",
           }, { ephemeral: true }).catch(() => {});
-        }, KEEPALIVE_INTERVAL_MS);
-        // Don't prevent process exit
-        if (keepaliveTimer.unref) keepaliveTimer.unref();
-      }
 
-      try {
-        const call = await loadCallGateway(api);
+          // Build a fresh enriched message for the exec phase with the plan
+          // getBaseUrl was already imported above
+          const execApiBaseUrl = cfg.apiBaseUrl || (await import("../api/base-url.js")).getBaseUrl();
+          const execMessage = enableApi && apiToken
+            ? buildEnrichedMessage({
+                action: "created",
+                id, title, url, desc, guidance,
+                prompt: "",
+                repo, session, context,
+                compact: false,
+                apiBaseUrl: execApiBaseUrl, apiToken, issueId, teamId, repoDir: repo,
+              }) + "\n\n---\n" + buildExecPhaseMessage(planText)
+            : buildExecPhaseMessage(planText);
+
+          const execResult = await call({
+            method: "agent",
+            params: {
+              message: execMessage,
+              sessionKey: execSessionKey,
+              label: `${label} [exec]`,
+              idempotencyKey: `${idem}-exec`,
+            },
+            expectFinal: true,
+            timeoutMs: AGENT_TIMEOUT_MS,
+          });
+          agentText = buildAgentResponse(execResult);
+          api.logger.info?.(`linear [phase=exec]: completed, textLen=${agentText?.length ?? 0}`);
+        }
+      } else {
+        // ── Single-phase dispatch (for prompted/follow-ups) ──
         api.logger.info?.(`linear: dispatching via callGateway, sessionKey=${sessionKey}`);
         const agentResult = await call({
           method: "agent",
@@ -413,66 +544,28 @@ async function handleAgentEvent(
         });
         agentText = buildAgentResponse(agentResult);
         api.logger.info?.(`linear: callGateway completed, sessionKey=${sessionKey}, textLen=${agentText?.length ?? 0}`);
-      } catch (dispatchErr) {
-        const dispatchMsg = dispatchErr instanceof Error ? dispatchErr.message : String(dispatchErr);
-        api.logger.warn?.(`linear: callGateway dispatch failed (${dispatchMsg})`);
-        agentError = dispatchMsg;
-      } finally {
-        keepaliveAlive = false;
-        if (keepaliveTimer) clearInterval(keepaliveTimer);
       }
+    } catch (dispatchErr) {
+      const dispatchMsg = dispatchErr instanceof Error ? dispatchErr.message : String(dispatchErr);
+      api.logger.warn?.(`linear: callGateway dispatch failed (${dispatchMsg})`);
+      agentError = dispatchMsg;
+    } finally {
+      keepaliveAlive = false;
+      if (keepaliveTimer) clearInterval(keepaliveTimer);
+    }
 
-      // ── Cleanup ──
-      if (session) inflightSessions.delete(session);
-      if (apiToken) revokeSessionToken(apiToken);
-      if (session) cleanupSession(session);
+    // ── Cleanup ──
+    if (session) inflightSessions.delete(session);
+    if (apiToken) revokeSessionToken(apiToken);
+    if (session) cleanupSession(session);
 
-      const hasAgentResponse = session && hasPostedResponse(session);
-      api.logger.info?.(`linear: agent run done, session=${session ? session.slice(0, 8) + "..." : "(none)"}, hasResponse=${Boolean(hasAgentResponse)}, error=${Boolean(agentError)}, textLen=${agentText?.length ?? 0}`);
+    const hasAgentResponse = session && hasPostedResponse(session);
+    api.logger.info?.(`linear: agent run done, session=${session ? session.slice(0, 8) + "..." : "(none)"}, hasResponse=${Boolean(hasAgentResponse)}, error=${Boolean(agentError)}, textLen=${agentText?.length ?? 0}`);
 
-      // If the agent explicitly posted a response via the API, skip auto-post.
-      if (hasAgentResponse) {
-        clearResponseFlag(session);
-        // Still run post-completion tasks
-        if (session && repo) {
-          autolinkPRToIssue(api, cfg, {
-            sessionId: session,
-            issueId,
-            issueIdentifier: id,
-            issueTitle: title,
-            repoDir: repo,
-          }).catch((e) => api.logger.warn?.(`linear: autolinkPR failed: ${e instanceof Error ? e.message : String(e)}`));
-        }
-        // Auto-close issue if agent ran on a "created" action and completed without error
-        if (action === "created" && issueId && !agentError && resolveFlag(cfg.closeOnComplete, true)) {
-          autoCloseIssue(api, cfg, issueId).catch((e) => api.logger.warn?.(`linear: autoCloseIssue failed: ${e instanceof Error ? e.message : String(e)}`));
-        }
-        return;
-      }
-
-      // ── Post agent response or error to Linear ──
-      if (agentError) {
-        // Dispatch itself failed — post error activity
-        api.logger.info?.(`linear: posting dispatch error to Linear, session=${session ? session.slice(0, 8) + "..." : "(none)"}`);
-        await postActivity(api, cfg, session, {
-          type: "error",
-          body: `Agent dispatch failed: ${agentError}`,
-        }).catch((e) => api.logger.warn?.(`linear: failed to post error to Linear: ${e instanceof Error ? e.message : String(e)}`));
-      } else if (agentText && agentText !== "Agent completed with no reply.") {
-        api.logger.info?.(`linear: posting agent response to Linear, session=${session ? session.slice(0, 8) + "..." : "(none)"}, textLen=${agentText.length}`);
-        await postActivity(api, cfg, session, { type: "response", body: agentText }).catch((e) => api.logger.warn?.(`linear: failed to post response to Linear: ${e instanceof Error ? e.message : String(e)}`));
-      } else {
-        // Agent completed with no text — post a minimal response so the user sees completion
-        api.logger.info?.(`linear: agent returned empty response, posting minimal response, session=${session ? session.slice(0, 8) + "..." : "(none)"}`);
-        await postActivity(api, cfg, session, {
-          type: "response",
-          body: "Done — no further output from the agent.",
-        }).catch((e) => api.logger.warn?.(`linear: failed to post minimal response: ${e instanceof Error ? e.message : String(e)}`));
-      }
-
-      // ── Post-completion tasks (after response is posted) ──
-
-      // Auto-detect and link any PRs created during the agent run
+    // If the agent explicitly posted a response via the API, skip auto-post.
+    if (hasAgentResponse) {
+      clearResponseFlag(session);
+      // Still run post-completion tasks
       if (session && repo) {
         autolinkPRToIssue(api, cfg, {
           sessionId: session,
@@ -482,11 +575,49 @@ async function handleAgentEvent(
           repoDir: repo,
         }).catch((e) => api.logger.warn?.(`linear: autolinkPR failed: ${e instanceof Error ? e.message : String(e)}`));
       }
-
       // Auto-close issue if agent ran on a "created" action and completed without error
       if (action === "created" && issueId && !agentError && resolveFlag(cfg.closeOnComplete, true)) {
         autoCloseIssue(api, cfg, issueId).catch((e) => api.logger.warn?.(`linear: autoCloseIssue failed: ${e instanceof Error ? e.message : String(e)}`));
       }
+      return;
+    }
+
+    // ── Post agent response or error to Linear ──
+    if (agentError) {
+      // Dispatch itself failed — post error activity
+      api.logger.info?.(`linear: posting dispatch error to Linear, session=${session ? session.slice(0, 8) + "..." : "(none)"}`);
+      await postActivity(api, cfg, session, {
+        type: "error",
+        body: `Agent dispatch failed: ${agentError}`,
+      }).catch((e) => api.logger.warn?.(`linear: failed to post error to Linear: ${e instanceof Error ? e.message : String(e)}`));
+    } else if (agentText && agentText !== "Agent completed with no reply.") {
+      api.logger.info?.(`linear: posting agent response to Linear, session=${session ? session.slice(0, 8) + "..." : "(none)"}, textLen=${agentText.length}`);
+      await postActivity(api, cfg, session, { type: "response", body: agentText }).catch((e) => api.logger.warn?.(`linear: failed to post response to Linear: ${e instanceof Error ? e.message : String(e)}`));
+    } else {
+      // Agent completed with no text — post a minimal response so the user sees completion
+      api.logger.info?.(`linear: agent returned empty response, posting minimal response, session=${session ? session.slice(0, 8) + "..." : "(none)"}`);
+      await postActivity(api, cfg, session, {
+        type: "response",
+        body: "Done — no further output from the agent.",
+      }).catch((e) => api.logger.warn?.(`linear: failed to post minimal response: ${e instanceof Error ? e.message : String(e)}`));
+    }
+
+    // ── Post-completion tasks (after response is posted) ──
+
+    // Auto-detect and link any PRs created during the agent run
+    if (session && repo) {
+      autolinkPRToIssue(api, cfg, {
+        sessionId: session,
+        issueId,
+        issueIdentifier: id,
+        issueTitle: title,
+        repoDir: repo,
+      }).catch((e) => api.logger.warn?.(`linear: autolinkPR failed: ${e instanceof Error ? e.message : String(e)}`));
+    }
+
+    // Auto-close issue if agent ran on a "created" action and completed without error
+    if (action === "created" && issueId && !agentError && resolveFlag(cfg.closeOnComplete, true)) {
+      autoCloseIssue(api, cfg, issueId).catch((e) => api.logger.warn?.(`linear: autoCloseIssue failed: ${e instanceof Error ? e.message : String(e)}`));
     }
   } catch (err) {
     if (session) inflightSessions.delete(session);
