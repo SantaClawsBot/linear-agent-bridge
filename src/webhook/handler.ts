@@ -378,6 +378,25 @@ async function handleAgentEvent(
     // but recovers afterward.
     //
     {
+      // Keepalive: post ephemeral thoughts to Linear so the session
+      // isn't marked "stopped responding" during long agent runs.
+      // Linear expects an activity within ~10s of session creation
+      // and periodically thereafter.
+      let keepaliveTimer: ReturnType<typeof setInterval> | undefined;
+      let keepaliveAlive = true;
+      if (session && enableApi) {
+        const KEEPALIVE_INTERVAL_MS = 8_000;
+        keepaliveTimer = setInterval(() => {
+          if (!keepaliveAlive) return;
+          postActivity(api, cfg, session, {
+            type: "thought",
+            body: "Working…",
+          }, { ephemeral: true }).catch(() => {});
+        }, KEEPALIVE_INTERVAL_MS);
+        // Don't prevent process exit
+        if (keepaliveTimer.unref) keepaliveTimer.unref();
+      }
+
       try {
         const call = await loadCallGateway(api);
         api.logger.info?.(`linear: dispatching via callGateway, sessionKey=${sessionKey}`);
@@ -398,6 +417,9 @@ async function handleAgentEvent(
         const dispatchMsg = dispatchErr instanceof Error ? dispatchErr.message : String(dispatchErr);
         api.logger.warn?.(`linear: callGateway dispatch failed (${dispatchMsg})`);
         agentError = dispatchMsg;
+      } finally {
+        keepaliveAlive = false;
+        if (keepaliveTimer) clearInterval(keepaliveTimer);
       }
 
       // ── Cleanup ──
