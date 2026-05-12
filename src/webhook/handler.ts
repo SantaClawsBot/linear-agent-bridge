@@ -645,7 +645,7 @@ async function handleAgentEvent(
                   body: "Running code review…",
                 }, { ephemeral: true }).catch(() => {});
 
-                const MAX_REVIEW_ROUNDS = 3;
+                const MAX_REVIEW_ROUNDS = 5;
                 for (let round = 1; round <= MAX_REVIEW_ROUNDS; round++) {
                   const review = await runClaudePrReview(effectiveDir);
                   api.logger.info?.(`linear [phase=review]: round ${round}, ok=${review.ok}, outputLen=${review.output.length}`);
