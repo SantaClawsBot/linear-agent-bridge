@@ -519,6 +519,8 @@ async function runClaudePrReview(
       "--permission-mode", "bypassPermissions",
       "--output-format", "text",
       "--no-session-persistence",
+      "--model", "gpt-5.3-codex-spark",
+      "--append-system-prompt", "Be concise. Output a compact summary: list only critical and important issues with file:line. Skip suggestions, tips, strengths, and boilerplate. Use bullet points, not prose.",
       prompt,
     ];
 
@@ -629,16 +631,28 @@ registerApiHandler(
       }).catch(() => {});
     }
 
-    // Full review text goes back to the agent only
-    sendJson(res, 200, {
-      ok: allPassed,
-      rounds: reviews.length,
-      reviews: reviews.map((r) => ({
+    // Compact review text back to the agent — truncate to avoid context overflow
+    const MAX_REVIEW_CHARS = 8_000;
+    const compactReviews = reviews.map((r) => {
+      let output = r.output;
+      if (output.length > MAX_REVIEW_CHARS) {
+        // Keep the beginning (summary) and tail (action plan)
+        const head = output.slice(0, MAX_REVIEW_CHARS * 0.7);
+        const tail = output.slice(-MAX_REVIEW_CHARS * 0.3);
+        output = `${head}\n\n... (truncated ${output.length - MAX_REVIEW_CHARS} chars) ...\n\n${tail}`;
+      }
+      return {
         round: r.round,
         ok: r.ok,
         ...(r.error ? { error: r.error } : {}),
-        output: r.output,
-      })),
+        output,
+      };
+    });
+
+    sendJson(res, 200, {
+      ok: allPassed,
+      rounds: reviews.length,
+      reviews: compactReviews,
     });
   },
 );
