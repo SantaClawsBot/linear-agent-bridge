@@ -1,9 +1,5 @@
 import { buildMessage, type MessageParams } from "../webhook/message-builder.js";
-import fs from "node:fs";
-import path from "node:path";
-
-const REPO_CONVENTION_FILES = ["AGENTS.md", "CLAUDE.md"];
-const MAX_CONVENTION_BYTES = 4000;
+import { readRepoConventions } from "./repo-conventions.js";
 
 export interface EnrichedMessageParams extends MessageParams {
   apiBaseUrl: string;
@@ -18,34 +14,6 @@ const TBT = BT + BT + BT; // triple backtick for code blocks
 
 function codeBlock(lang: string, code: string): string {
   return TBT + lang + "\n" + code + "\n" + TBT;
-}
-
-/**
- * Try to read repo convention files (AGENTS.md, CLAUDE.md) from the repo dir.
- * Returns the first one found, capped at MAX_CONVENTION_BYTES.
- */
-function readRepoConventions(repoDir: string): string | null {
-  if (!repoDir) return null;
-  for (const filename of REPO_CONVENTION_FILES) {
-    const filePath = path.join(repoDir, filename);
-    try {
-      if (!fs.existsSync(filePath)) continue;
-      const stat = fs.statSync(filePath);
-      if (stat.size > MAX_CONVENTION_BYTES) {
-        // Truncate large files to the limit
-        const buf = Buffer.alloc(MAX_CONVENTION_BYTES);
-        const fd = fs.openSync(filePath, "r");
-        fs.readSync(fd, buf, 0, MAX_CONVENTION_BYTES, 0);
-        fs.closeSync(fd);
-        return buf.toString("utf-8").replace(/\n[^]*$/, "\n\n... (truncated)");
-      }
-      const content = fs.readFileSync(filePath, "utf-8").trim();
-      if (content) return content;
-    } catch {
-      // File not readable — skip silently
-    }
-  }
-  return null;
 }
 
 export function buildEnrichedMessage(params: EnrichedMessageParams): string {

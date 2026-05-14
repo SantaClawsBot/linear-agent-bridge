@@ -3,6 +3,7 @@ import { callLinear } from "../linear-client.js";
 import { postActivity } from "../webhook/handler.js";
 import { SESSION_UPDATE_MUTATION } from "../graphql/mutations.js";
 import { readString, readObject, sendJson } from "../util.js";
+import { formatConventionalTitle } from "../agent/repo-conventions.js";
 import type { OpenClawPluginApi } from "../types.js";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
@@ -182,6 +183,7 @@ registerApiHandler(
 
     const title =
       readString(body.title as string) ||
+      formatConventionalTitle(context.issueIdentifier, context.issueTitle, effectiveDir) ||
       `${context.issueIdentifier} ${context.issueTitle}`;
     const bodyText =
       readString(body.body as string) ||
