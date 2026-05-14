@@ -89,13 +89,13 @@ export function formatConventionalTitle(
 
   // Don't double-prefix if the title already looks conventional
   if (/^(feat|fix|docs|chore|refactor|test|build|ci|perf|style|revert)(\(|:)/.test(description)) {
-    return `${issueIdentifier} ${description}`;
+    return `${description} (${issueIdentifier})`;
   }
 
   // Heuristic: detect type from the issue title
   const type = inferType(description);
 
-  return `${issueIdentifier} ${type}: ${description}`;
+  return `${type}: ${description} (${issueIdentifier})`;
 }
 
 function inferType(title: string): string {
