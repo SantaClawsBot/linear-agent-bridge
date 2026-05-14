@@ -12,7 +12,7 @@ import "./src/api/delegation-ops.js";
 import "./src/api/query-ops.js";
 import "./src/api/pr-ops.js";
 
-export default function register(api: OpenClawPluginApi): void {
+export function register(api: OpenClawPluginApi): void {
   api.registerHttpRoute({
     auth: "plugin",
     path: "/plugins/linear/linear",
@@ -43,3 +43,20 @@ export default function register(api: OpenClawPluginApi): void {
     handler: createLinearOauthRoute(api),
   });
 }
+
+export const activate = register;
+
+export function deactivate(api: OpenClawPluginApi): void {
+  // no-op
+}
+
+const plugin = {
+  id: "linear-agent-bridge",
+  name: "Linear",
+  description: "Linear agent webhook bridge for OpenClaw dev runs",
+  register,
+  activate,
+  deactivate,
+};
+
+export default plugin;

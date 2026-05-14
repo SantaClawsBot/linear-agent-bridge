@@ -2,6 +2,17 @@
   "id": "linear-agent-bridge",
   "name": "Linear",
   "description": "Linear agent webhook bridge for OpenClaw dev runs",
+  "activation": {
+    "onStartup": true,
+    "onRoutes": [
+      "linear",
+      "/plugins/linear/linear",
+      "/plugins/linear/api",
+      "/plugins/linear/oauth/callback",
+      "/plugins/linear/oauth/exchange",
+      "/plugins/linear/github"
+    ]
+  },
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
