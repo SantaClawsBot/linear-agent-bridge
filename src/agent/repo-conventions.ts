@@ -95,7 +95,7 @@ export function formatConventionalTitle(
   // Heuristic: detect type from the issue title
   const type = inferType(description);
 
-  return `${type}: ${description}`;
+  return `${issueIdentifier} ${type}: ${description}`;
 }
 
 function inferType(title: string): string {
