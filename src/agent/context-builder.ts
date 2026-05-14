@@ -146,6 +146,7 @@ Defaults to ${BT}git add -A${BT} + ${BT}git commit${BT}. Set ${BT}all: false${BT
 **action: "pr/create"** — Push branch and create a pull request
 { action: "pr/create", title?: "PR title", body?: "description", base?: "main", draft?: false, labels?: ["bugfix"], reviewers?: ["username"] }
 Defaults: title = issue identifier + title, body = "Closes <issue URL>", base = "main".
+**Automatically runs a pre-push code review** — if issues are found, the PR is NOT created and the review is returned in the response. Fix the issues, commit again, and retry pr/create.
 PR URL is automatically posted back to the Linear session.
 
 **action: "pr/status"** — Check current git status

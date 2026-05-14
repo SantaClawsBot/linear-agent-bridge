@@ -49,6 +49,8 @@ export interface PluginConfig {
   branchPrefix?: string;
   /** Auto-post PR URL to Linear session as external URL + activity */
   prReportToLinear?: boolean;
+  /** Auto-run Claude PR review before pushing (default: true). Set false to skip. */
+  prAutoReview?: boolean;
   /** GitHub webhook secret for PR review events (X-Hub-Signature-256) */
   githubWebhookSecret?: string;
   /** Auto-close issue to "completed" when agent finishes successfully on a "created" action (default: true) */

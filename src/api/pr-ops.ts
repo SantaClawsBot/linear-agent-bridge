@@ -209,6 +209,50 @@ registerApiHandler(
         return;
       }
 
+      // Auto-review before pushing
+      if (cfg.prAutoReview !== false) {
+        if (context.sessionId) {
+          await postActivity(api, cfg, context.sessionId, {
+            type: "thought",
+            body: "Running pre-push PR review...",
+          }, { ephemeral: true }).catch(() => {});
+        }
+
+        const reviewResult = await runClaudePrReview(effectiveDir, {
+          aspects: ["code", "errors", "types"],
+        });
+
+        if (reviewResult.ok && reviewResult.output) {
+          const o = reviewResult.output.toLowerCase();
+          const hasIssues =
+            (o.includes("critical") && !o.includes("0 critical") && !o.includes("no critical")) ||
+            (o.includes("important") && !o.includes("0 important") && !o.includes("no important")) ||
+            o.includes("must fix") || o.includes("should fix");
+
+          if (context.sessionId) {
+            await postActivity(api, cfg, context.sessionId, {
+              type: "action",
+              action: hasIssues ? "reviewed" : "reviewed",
+              parameter: "pre-push review",
+              result: hasIssues
+                ? `Review found issues:\n\n${reviewResult.output.slice(0, 1500)}`
+                : `No critical or important issues found`,
+            }).catch(() => {});
+          }
+
+          if (hasIssues) {
+            sendJson(res, 200, {
+              ok: false,
+              blocked: true,
+              reason: "PR review found issues that should be fixed before pushing",
+              review: reviewResult.output,
+              branch,
+            });
+            return;
+          }
+        }
+      }
+
       await git(["push", "-u", "origin", branch], effectiveDir);
 
       // Build gh pr create command
