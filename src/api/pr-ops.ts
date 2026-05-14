@@ -4,6 +4,7 @@ import { postActivity } from "../webhook/handler.js";
 import { SESSION_UPDATE_MUTATION } from "../graphql/mutations.js";
 import { readString, readObject, sendJson } from "../util.js";
 import { formatConventionalTitle } from "../agent/repo-conventions.js";
+import { markResponsePosted } from "../agent/response-tracker.js";
 import type { OpenClawPluginApi } from "../types.js";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
@@ -271,6 +272,18 @@ registerApiHandler(
 
       // Clean up the worktree after successful PR creation
       await cleanupWorktree(api, context.repoDir, context.issueIdentifier, context.issueTitle, branch);
+
+      // Auto-post a response activity to mark the session as complete
+      // so the agent stops working after PR submission
+      if (cfg.prReportToLinear !== false && context.sessionId) {
+        await postActivity(api, cfg, context.sessionId, {
+          type: "response",
+          body: `PR created: [${title}](${prUrl})`,
+        }).catch((e) =>
+          api.logger.warn?.(`linear: failed to post PR response activity: ${e instanceof Error ? e.message : String(e)}`),
+        );
+        markResponsePosted(context.sessionId);
+      }
 
       sendJson(res, 200, {
         ok: true,
