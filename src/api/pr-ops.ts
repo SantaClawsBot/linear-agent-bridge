@@ -3,6 +3,20 @@ import { callLinear } from "../linear-client.js";
 import { postActivity } from "../webhook/handler.js";
 import { SESSION_UPDATE_MUTATION } from "../graphql/mutations.js";
 import { readString, readObject, sendJson } from "../util.js";
+
+/**
+ * Resolve the working directory for a PR action.
+ * Priority: explicit `dir` in body → context.repoDir.
+ * This lets the agent work in arbitrary repos (e.g. freshly cloned)
+ * instead of being locked to the session's configured repoDir.
+ */
+function resolveDir(
+  body: Record<string, unknown>,
+  context: { repoDir: string },
+): string {
+  const dir = readString(body.dir as string);
+  return dir || context.repoDir;
+}
 import { formatConventionalTitle } from "../agent/repo-conventions.js";
 import { markResponsePosted } from "../agent/response-tracker.js";
 import type { OpenClawPluginApi } from "../types.js";
@@ -88,7 +102,7 @@ export function getEffectiveDir(context: { repoDir: string; issueIdentifier: str
 registerApiHandler(
   "/pr/branch",
   async ({ api, cfg, context, body, res }) => {
-    const repoDir = context.repoDir;
+    const repoDir = resolveDir(body, context);
     if (!repoDir) {
       sendJson(res, 400, { ok: false, error: "No repo directory configured for this issue" });
       return;
@@ -176,16 +190,18 @@ registerApiHandler(
 registerApiHandler(
   "/pr/create",
   async ({ api, cfg, context, body, res }) => {
-    const effectiveDir = context.repoDir ? getEffectiveDir(context) : "";
+    const repoDir = resolveDir(body, context);
+    const overrideContext = { ...context, repoDir };
+    const effectiveDir = repoDir ? getEffectiveDir(overrideContext) : "";
     if (!effectiveDir) {
-      sendJson(res, 400, { ok: false, error: "No repo directory configured for this issue" });
+      sendJson(res, 400, { ok: false, error: "No repo directory configured for this issue. Pass { dir: \"/path/to/repo\" } or configure defaultDir/repoByTeam/repoByProject." });
       return;
     }
 
     const title =
       readString(body.title as string) ||
-      formatConventionalTitle(context.issueIdentifier, context.issueTitle, effectiveDir) ||
-      `${context.issueIdentifier} ${context.issueTitle}`;
+      formatConventionalTitle(overrideContext.issueIdentifier, overrideContext.issueTitle, effectiveDir) ||
+      `${overrideContext.issueIdentifier} ${overrideContext.issueTitle}`;
     const bodyText =
       readString(body.body as string) ||
       `Closes ${context.issueUrl}`;
@@ -315,7 +331,7 @@ registerApiHandler(
       }
 
       // Clean up the worktree after successful PR creation
-      await cleanupWorktree(api, context.repoDir, context.issueIdentifier, context.issueTitle, branch);
+      await cleanupWorktree(api, repoDir, overrideContext.issueIdentifier, overrideContext.issueTitle, branch);
 
       // Auto-post a response activity to mark the session as complete
       // so the agent stops working after PR submission
@@ -347,9 +363,10 @@ registerApiHandler(
 registerApiHandler(
   "/pr/commit",
   async ({ api, context, body, res }) => {
-    const effectiveDir = context.repoDir ? getEffectiveDir(context) : "";
+    const repoDir = resolveDir(body, context);
+    const effectiveDir = repoDir ? getEffectiveDir({ repoDir, issueIdentifier: context.issueIdentifier, issueTitle: context.issueTitle }) : "";
     if (!effectiveDir) {
-      sendJson(res, 400, { ok: false, error: "No repo directory configured for this issue" });
+      sendJson(res, 400, { ok: false, error: 'No repo directory configured. Pass { dir: "/path/to/repo" } or configure defaultDir.' });
       return;
     }
 
@@ -388,10 +405,11 @@ registerApiHandler(
 // POST /pr/status — show git status of the effective working directory
 registerApiHandler(
   "/pr/status",
-  async ({ context, res }) => {
-    const effectiveDir = context.repoDir ? getEffectiveDir(context) : "";
+  async ({ context, body, res }) => {
+    const repoDir = resolveDir(body, context);
+    const effectiveDir = repoDir ? getEffectiveDir({ repoDir, issueIdentifier: context.issueIdentifier, issueTitle: context.issueTitle }) : "";
     if (!effectiveDir) {
-      sendJson(res, 400, { ok: false, error: "No repo directory configured for this issue" });
+      sendJson(res, 400, { ok: false, error: 'No repo directory configured. Pass { dir: "/path/to/repo" } or configure defaultDir.' });
       return;
     }
 
@@ -428,13 +446,14 @@ registerApiHandler(
 // POST /pr/cleanup — manually clean up a worktree for this issue
 registerApiHandler(
   "/pr/cleanup",
-  async ({ api, context, res }) => {
-    if (!context.repoDir) {
-      sendJson(res, 400, { ok: false, error: "No repo directory configured for this issue" });
+  async ({ api, context, body, res }) => {
+    const repoDir = resolveDir(body, context);
+    if (!repoDir) {
+      sendJson(res, 400, { ok: false, error: 'No repo directory configured. Pass { dir: "/path/to/repo" } or configure defaultDir.' });
       return;
     }
     try {
-      await cleanupWorktree(api, context.repoDir, context.issueIdentifier, context.issueTitle);
+      await cleanupWorktree(api, repoDir, context.issueIdentifier, context.issueTitle);
       sendJson(res, 200, { ok: true });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -637,9 +656,10 @@ export async function runClaudePrReview(
 registerApiHandler(
   "/pr/review",
   async ({ api, cfg, context, body, res }) => {
-    const effectiveDir = context.repoDir ? getEffectiveDir(context) : "";
+    const repoDir = resolveDir(body, context);
+    const effectiveDir = repoDir ? getEffectiveDir({ repoDir, issueIdentifier: context.issueIdentifier, issueTitle: context.issueTitle }) : "";
     if (!effectiveDir) {
-      sendJson(res, 400, { ok: false, error: "No repo directory configured for this issue" });
+      sendJson(res, 400, { ok: false, error: 'No repo directory configured. Pass { dir: "/path/to/repo" } or configure defaultDir.' });
       return;
     }
 

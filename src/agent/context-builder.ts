@@ -20,7 +20,7 @@ export function buildEnrichedMessage(params: EnrichedMessageParams): string {
   const baseMessage = buildMessage(params);
   if (params.compact) return baseMessage;
 
-  const repoDirNote = params.repoDir || "(none — repo must be configured)";
+  const repoDirNote = params.repoDir || "(none — pass { dir: \"/path/to/repo\" } on PR actions, or configure defaultDir)";
 
   const sections: string[] = [];
 
@@ -133,33 +133,37 @@ When you need to implement code changes and submit a PR, follow this workflow:
 4. **Commit changes** — ${BT}pr/commit${BT} to stage and commit
 5. **Create PR** — ${BT}pr/create${BT} to push and open a pull request (worktree is auto-cleaned)
 
+**All PR actions** accept an optional ${BT}dir${BT} parameter to override the working directory:
+{ action: "pr/branch", dir: "/path/to/other-repo", ... }
+This lets you work in any repo — not just the configured one. Use it when you clone a repo manually (e.g. ${BT}exec: "git clone https://github.com/org/repo /tmp/repo"${BT}).
+
 **action: "pr/branch"** — Create an isolated worktree and branch for this issue
-{ action: "pr/branch", branch?: "custom-name", base?: "main" }
+{ action: "pr/branch", dir?: "/path/to/repo", branch?: "custom-name", base?: "main" }
 Auto-generates branch name from issue identifier if not provided (e.g. ${BT}linear/eng-123-fix-bug${BT}).
 Creates a **git worktree** under ${BT}<repo>/.openclaw-worktrees/<issue-id>-<slug>/${BT} so each issue gets its own isolated checkout — no conflicts with other in-progress issues.
 After PR creation the worktree is automatically cleaned up.
 
 **action: "pr/commit"** — Stage and commit all changes
-{ action: "pr/commit", message?: "commit message", all?: true, files?: ["path1.ts"], allowEmpty?: false }
+{ action: "pr/commit", dir?: "/path/to/repo", message?: "commit message", all?: true, files?: ["path1.ts"], allowEmpty?: false }
 Defaults to ${BT}git add -A${BT} + ${BT}git commit${BT}. Set ${BT}all: false${BT} and provide ${BT}files${BT} to stage selectively.
 
 **action: "pr/create"** — Push branch and create a pull request
-{ action: "pr/create", title?: "PR title", body?: "description", base?: "main", draft?: false, labels?: ["bugfix"], reviewers?: ["username"] }
+{ action: "pr/create", dir?: "/path/to/repo", title?: "PR title", body?: "description", base?: "main", draft?: false, labels?: ["bugfix"], reviewers?: ["username"] }
 Defaults: title = issue identifier + title, body = "Closes <issue URL>", base = "main".
 **Automatically runs a pre-push code review** — if issues are found, the PR is NOT created and the review is returned in the response. Fix the issues, commit again, and retry pr/create.
 PR URL is automatically posted back to the Linear session.
 
 **action: "pr/status"** — Check current git status
-{ action: "pr/status" }
+{ action: "pr/status", dir?: "/path/to/repo" }
 Returns current branch, number of dirty files, and recent commits.
 If a worktree is active for this issue, ${BT}worktree${BT} field contains its path.
 
 **action: "pr/cleanup"** — Remove the worktree for this issue
-{ action: "pr/cleanup" }
+{ action: "pr/cleanup", dir?: "/path/to/repo" }
 Removes the isolated worktree directory. Called automatically after PR creation.
 
 **action: "pr/review"** — Run a Claude Code PR review on your local diff (synchronous)
-{ action: "pr/review", aspects?: ["code", "errors"], maxRounds?: 2 }
+{ action: "pr/review", dir?: "/path/to/repo", aspects?: ["code", "errors"], maxRounds?: 2 }
 Runs the ${BT}pr-review-toolkit:review-pr${BT} skill via Claude Code on the committed changes in your worktree vs the base branch.
 **No PR needs to exist yet** — this reviews your local diff before you push.
 Returns the full review text in the JSON response so you can act on it (fix issues, re-commit, re-review).
@@ -176,7 +180,7 @@ ${codeBlock("", [
   "5. pr/create   → push + open PR",
 ].join("\n"))}
 
-**Important:** If no repo directory is configured (see "Repo directory" above), the PR actions will fail. Ensure the plugin config has ${BT}defaultDir${BT}, ${BT}repoByTeam${BT}, or ${BT}repoByProject${BT} set.`);
+**Important:** PR actions default to the configured repo directory (see "Repo directory" above). If none is configured, or if you need to work in a different repo, pass ${BT}dir: "/path/to/repo"${BT} in the action body. For example, clone a repo with ${BT}exec${BT}, then use ${BT}{ action: "pr/branch", dir: "/tmp/cloned-repo" }${BT} to work in it.`);
 
   // Progress & Tips
   sections.push(`### Progress Reporting — IMPORTANT
