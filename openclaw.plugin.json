@@ -133,6 +133,18 @@
       "closeOnComplete": {
         "type": "boolean",
         "description": "Auto-close issue to 'completed' when agent finishes successfully on a 'created' action (default: true)"
+      },
+      "repositories": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "object",
+          "properties": {
+            "cloneUrl": { "type": "string", "description": "Git clone URL" },
+            "dir": { "type": "string", "description": "Local directory if already cloned (omit to let agent clone on demand)" }
+          },
+          "required": ["cloneUrl"]
+        },
+        "description": "Known repositories the agent can work in. Map of name → { cloneUrl, dir? }. Used for repo inference from issue context."
       }
     }
   },

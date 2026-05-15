@@ -55,6 +55,13 @@ export interface PluginConfig {
   githubWebhookSecret?: string;
   /** Auto-close issue to "completed" when agent finishes successfully on a "created" action (default: true) */
   closeOnComplete?: boolean;
+  /**
+   * Known repositories the agent can work in.
+   * Map of repo short-name → { cloneUrl, dir? }.
+   * If `dir` is set, the repo is expected to already be cloned there.
+   * If `dir` is omitted, the agent should clone it to a temp directory.
+   */
+  repositories?: Record<string, { cloneUrl: string; dir?: string }>;
 }
 
 

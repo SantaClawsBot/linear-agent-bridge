@@ -216,6 +216,7 @@ async function processGitHubEvent(
       issueId,
       teamId,
       repoDir: repo,
+      repositories: cfg.repositories,
     });
   } else {
     const { buildMessage } = await import("./message-builder.js");

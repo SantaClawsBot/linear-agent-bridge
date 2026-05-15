@@ -7,6 +7,7 @@ export interface EnrichedMessageParams extends MessageParams {
   issueId: string;
   teamId: string;
   repoDir: string;
+  repositories?: Record<string, { cloneUrl: string; dir?: string }>;
 }
 
 const BT = String.fromCharCode(96); // backtick
@@ -43,7 +44,35 @@ ${codeBlock("json", '{ "action": "query/viewer" }')}
 - Team ID: ${params.teamId}
 - Repo directory: ${repoDirNote}`);
 
-  // Issue Management
+  // Repository registry & inference
+  const repos = params.repositories;
+  if (repos && Object.keys(repos).length > 0) {
+    const repoList = Object.entries(repos)
+      .map(([name, r]) => {
+        const loc = r.dir ? r.dir : "(clone on demand)";
+        return `${BT}${name}${BT}: ${r.cloneUrl} → ${loc}`;
+      })
+      .join("\n");
+    sections.push(`### Repository Registry
+
+The following repositories are available for work. **Infer the target repo from the issue context** — check the issue title, description, labels, and project for repo name mentions or hints.
+
+${repoList}
+
+**Repo inference strategy:**
+1. If the issue explicitly mentions a repo name (e.g. "dao-dao-indexer"), use that repo.
+2. If the issue mentions a GitHub URL, extract the repo from it.
+3. If the issue is in a Linear project that suggests a repo (e.g. project "dao-dao-indexer"), use that.
+4. If unsure, fall back to the configured repo directory: ${repoDirNote}.
+
+**When the target repo is NOT the configured repo directory:**
+- If the repo has a local ${BT}dir${BT}, use it directly with the ${BT}dir${BT} parameter on PR actions.
+- If no local ${BT}dir${BT}, clone it first: ${BT}{ action: "exec", command: "git clone <cloneUrl> /tmp/<name>" }${BT}
+- Then pass ${BT}{ dir: "/tmp/<name>" }${BT} on all PR actions (pr/branch, pr/commit, pr/create, etc.).
+- You can also call ${BT}query/repositories${BT} to list known repos at any time.`);
+  }
+
+    // Issue Management
   sections.push(`### Issue Management
 
 **action: "issue/create"** — Create a new issue
@@ -116,7 +145,11 @@ Note: replaces the entire plan each time. Include all steps.
 **action: "query/team"** — Get team info (workflow states, labels, members)
 { action: "query/team", teamId? }
 
-**action: "query/repo-suggestions"** — Get AI-ranked repository suggestions
+**action: "query/repositories"** — List known repositories from plugin config
+{ action: "query/repositories" }
+Returns the configured repository registry (name → { cloneUrl, dir }). Use this to find repos to work in.
+
+**action: "query/repo-suggestions"** — Get AI-ranked repository suggestions from Linear
 { action: "query/repo-suggestions", issueId?, candidateRepositories: [{ hostname, repositoryFullName }] }
 
 **action: "query/viewer"** — Get the current app identity

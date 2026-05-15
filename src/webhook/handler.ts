@@ -472,6 +472,7 @@ async function handleAgentEvent(
       issueId,
       teamId,
       repoDir: repo,
+      repositories: cfg.repositories,
     });
   } else {
     api.logger.info?.(`linear handler: PLAIN message (no enrichment), enableApi=${enableApi}, apiToken=${apiToken ? "set" : "empty"}`);
@@ -616,7 +617,7 @@ async function handleAgentEvent(
                 prompt: "",
                 repo, session, context,
                 compact: false,
-                apiBaseUrl: execApiBaseUrl, apiToken, issueId, teamId, repoDir: repo,
+                apiBaseUrl: execApiBaseUrl, apiToken, issueId, teamId, repoDir: repo, repositories: cfg.repositories,
               }) + "\n\n---\n" + buildExecPhaseMessage(effectivePlan)
             : buildExecPhaseMessage(effectivePlan);
 
