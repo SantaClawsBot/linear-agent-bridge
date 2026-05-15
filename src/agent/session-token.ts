@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import type { SessionContext } from "../types.js";
+import { clearSessionPRs } from "./pr-tracker.js";
 
 const activeTokens = new Map<string, SessionContext>();
 
@@ -17,5 +18,7 @@ export function validateSessionToken(
 }
 
 export function revokeSessionToken(token: string): void {
+  const ctx = activeTokens.get(token);
+  if (ctx?.sessionId) clearSessionPRs(ctx.sessionId);
   activeTokens.delete(token);
 }

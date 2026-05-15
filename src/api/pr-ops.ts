@@ -19,6 +19,7 @@ function resolveDir(
 }
 import { formatConventionalTitle } from "../agent/repo-conventions.js";
 import { markResponsePosted } from "../agent/response-tracker.js";
+import { addSessionPR, getSessionPRs } from "../agent/pr-tracker.js";
 import type { OpenClawPluginApi } from "../types.js";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
@@ -202,9 +203,22 @@ registerApiHandler(
       readString(body.title as string) ||
       formatConventionalTitle(overrideContext.issueIdentifier, overrideContext.issueTitle, effectiveDir) ||
       `${overrideContext.issueIdentifier} ${overrideContext.issueTitle}`;
-    const bodyText =
-      readString(body.body as string) ||
-      `Closes ${context.issueUrl}`;
+    // Build PR body with optional cross-references to sibling PRs
+    const existingPRs = context.sessionId ? getSessionPRs(context.sessionId) : [];
+    const explicitBody = readString(body.body as string);
+    const closeRef = `Closes ${context.issueUrl}`;
+    let bodyText: string;
+    if (explicitBody) {
+      bodyText = explicitBody;
+    } else if (existingPRs.length > 0) {
+      // Multi-repo: cross-link sibling PRs
+      const siblingLinks = existingPRs
+        .map(p => `- ${p.title}: ${p.prUrl}`)
+        .join("\n");
+      bodyText = `${closeRef}\n\n**Related PRs:**\n${siblingLinks}`;
+    } else {
+      bodyText = closeRef;
+    }
     const baseBranch = readString(body.base as string) ?? "main";
     const draft = body.draft === true;
     const labels = Array.isArray(body.labels) ? body.labels : [];
@@ -330,26 +344,47 @@ registerApiHandler(
         ).catch(() => {});
       }
 
+      // Record PR in session tracker for cross-referencing
+      if (context.sessionId) {
+        addSessionPR(context.sessionId, {
+          repoName: effectiveDir.split("/").pop() || effectiveDir,
+          prUrl,
+          prNumber,
+          branch,
+          title,
+        });
+      }
+
       // Clean up the worktree after successful PR creation
       await cleanupWorktree(api, repoDir, overrideContext.issueIdentifier, overrideContext.issueTitle, branch);
 
-      // Auto-post a response activity to mark the session as complete
-      // so the agent stops working after PR submission
+      // Auto-post a response activity
       if (cfg.prReportToLinear !== false && context.sessionId) {
+        const allPRs = getSessionPRs(context.sessionId);
+        const isMultiRepo = allPRs.length > 1;
+        const respBody = isMultiRepo
+          ? `${allPRs.length} PRs created:\n${allPRs.map(p => `- [${p.title}](${p.prUrl}) (${p.repoName})`).join("\n")}`
+          : `PR created: [${title}](${prUrl})`;
         await postActivity(api, cfg, context.sessionId, {
           type: "response",
-          body: `PR created: [${title}](${prUrl})`,
+          body: respBody,
         }).catch((e) =>
           api.logger.warn?.(`linear: failed to post PR response activity: ${e instanceof Error ? e.message : String(e)}`),
         );
-        markResponsePosted(context.sessionId);
+        // Only mark response posted on the final PR — the agent may have more repos to process
+        // We let the agent decide when to stop by not auto-marking for multi-repo
+        if (!isMultiRepo) {
+          markResponsePosted(context.sessionId);
+        }
       }
 
+      const allSessionPRs = context.sessionId ? getSessionPRs(context.sessionId) : [];
       sendJson(res, 200, {
         ok: true,
         prUrl,
         prNumber,
         branch,
+        sessionPRs: allSessionPRs.length > 1 ? allSessionPRs : undefined,
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

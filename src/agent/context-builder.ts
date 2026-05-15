@@ -204,7 +204,7 @@ Linear only sees a brief ✅/⚠️ status — the full review is between you an
 ${BT}aspects${BT} is optional: ${BT}["comments", "tests", "errors", "types", "code", "simplify"]${BT}. Default: all aspects.
 ${BT}maxRounds${BT} is optional (1-5, default 1). When >1, re-runs review until it passes clean or max is reached.
 
-**Recommended pre-push workflow:**
+**Recommended pre-push workflow (single repo):**
 ${codeBlock("", [
   "1. pr/branch   → create branch",
   "2. exec        → write code",
@@ -212,6 +212,22 @@ ${codeBlock("", [
   "4. pr/review   → get review (repeat 2-4 until clean)",
   "5. pr/create   → push + open PR",
 ].join("\n"))}
+
+**Multi-repo coordination:** When an issue requires changes across multiple repositories:
+${codeBlock("", [
+  "1. Plan all repos upfront (session/plan with per-repo steps)",
+  "2. For each repo:",
+  "   a. Clone if needed (exec: git clone <url> /tmp/<name>)",
+  "   b. pr/branch   { dir: \"/tmp/<name>\" }",
+  "   c. exec        → write code in that repo",
+  "   d. pr/commit   { dir: \"/tmp/<name>\" }",
+  "   e. pr/review   { dir: \"/tmp/<name>\" }",
+  "   f. pr/create   { dir: \"/tmp/<name>\" }",
+  "3. PRs are automatically cross-linked — each PR body references sibling PRs",
+  "4. The final pr/create response lists all session PRs",
+].join("\n"))}
+
+When you create multiple PRs, the session tracks all of them. Each subsequent ${BT}pr/create${BT} automatically adds cross-references to earlier PRs in its body, and the response includes a ${BT}sessionPRs${BT} array with all PRs opened so far.
 
 **Important:** PR actions default to the configured repo directory (see "Repo directory" above). If none is configured, or if you need to work in a different repo, pass ${BT}dir: "/path/to/repo"${BT} in the action body. For example, clone a repo with ${BT}exec${BT}, then use ${BT}{ action: "pr/branch", dir: "/tmp/cloned-repo" }${BT} to work in it.`);
 
