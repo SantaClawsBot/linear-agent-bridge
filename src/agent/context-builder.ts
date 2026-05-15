@@ -53,17 +53,35 @@ ${codeBlock("json", '{ "action": "query/viewer" }')}
         return `${BT}${name}${BT}: ${r.cloneUrl} → ${loc}`;
       })
       .join("\n");
+
+    const repoOptions = Object.keys(repos)
+      .map(name => `    { value: "${name}", title: "${name}" }`)
+      .join(",\n");
+
+    const elicitationExample = codeBlock("json", [
+      '{ action: "activity/elicitation",',
+      '  body: "Which repository should I make changes in for this issue?",',
+      '  signal: "select",',
+      '  signalMeta: { options: [',
+      repoOptions,
+      '  ] } }',
+    ].join("\n"));
+
     sections.push(`### Repository Registry
 
 The following repositories are available for work. **Infer the target repo from the issue context** — check the issue title, description, labels, and project for repo name mentions or hints.
 
 ${repoList}
 
-**Repo inference strategy:**
+**Repo inference strategy (follow in order):**
 1. If the issue explicitly mentions a repo name (e.g. "dao-dao-indexer"), use that repo.
 2. If the issue mentions a GitHub URL, extract the repo from it.
 3. If the issue is in a Linear project that suggests a repo (e.g. project "dao-dao-indexer"), use that.
-4. If unsure, fall back to the configured repo directory: ${repoDirNote}.
+4. If unclear, use ${BT}query/issue${BT} to check labels, project, and description for hints.
+5. If still unclear, **ask the user** with an elicitation — present the known repos as select options:
+${elicitationExample}
+   Wait for the user's reply before proceeding.
+6. If the user doesn't select a repo or the repo isn't in the registry, fall back to the configured repo directory: ${repoDirNote}.
 
 **When the target repo is NOT the configured repo directory:**
 - If the repo has a local ${BT}dir${BT}, use it directly with the ${BT}dir${BT} parameter on PR actions.
