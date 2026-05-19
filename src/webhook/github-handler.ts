@@ -262,6 +262,8 @@ async function processGitHubEvent(
       api.logger.warn?.(`github: agent dispatch failed: ${dispatchErr instanceof Error ? dispatchErr.message : String(dispatchErr)}`);
       if (apiToken) revokeSessionToken(apiToken);
       cleanupSession(session);
+      // Must post response to end the session — error alone does not end it
+      postActivity(api, cfg, session, { type: "response", body: `Agent failed: ${dispatchErr instanceof Error ? dispatchErr.message : String(dispatchErr)}` }).catch(() => {});
       return;
     }
 
@@ -275,7 +277,11 @@ async function processGitHubEvent(
 
     const { buildAgentResponse } = await import("./response-parser.js");
     const text = buildAgentResponse(agentResult);
-    if (!text || text === "Agent completed with no reply.") return;
+    if (!text || text === "Agent completed with no reply.") {
+      // Must still post response to end the session
+      postActivity(api, cfg, session, { type: "response", body: "Done — no further output." }).catch(() => {});
+      return;
+    }
 
     postActivity(api, cfg, session, { type: "response", body: text }).catch(() => {});
   });
