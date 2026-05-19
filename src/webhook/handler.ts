@@ -47,7 +47,6 @@ import { isCloseIntentPrompt, closeIssueFromPrompt } from "./close-intent.js";
 import { shouldSkipPromptedRun, isSelfAuthoredComment } from "./skip-filter.js";
 import { createSessionToken, revokeSessionToken } from "../agent/session-token.js";
 import { buildEnrichedMessage } from "../agent/context-builder.js";
-import { autolinkPRToIssue, runClaudePrReview, getEffectiveDir } from "../api/pr-ops.js";
 import { cleanupSession } from "../agent/plan-manager.js";
 import { hasPostedResponse, clearResponseFlag } from "../agent/response-tracker.js";
 import { captureBaseUrl } from "../api/base-url.js";
@@ -134,71 +133,8 @@ function buildExecPhaseMessage(plan: string): string {
   ].join("\n");
 }
 
-function buildCritiquePhaseMessage(plan: string): string {
-  return [
-    "You are a CODE REVIEWER (adversary). Another agent produced this implementation plan:",
-    "",
-    plan,
-    "",
-    "---",
-    "## INSTRUCTIONS — CRITIQUE PHASE",
-    "",
-    "Your job is to find flaws in this plan. Be ruthless. Check:",
-    "",
-    "1. **Missing files** — Did the plan miss any files that need changes? Spot-check imports, callers, tests.",
-    "2. **Wrong approach** — Is the proposed approach correct? Are there simpler or more idiomatic alternatives?",
-    "3. **Edge cases** — Does the plan handle error cases, empty states, null values, auth checks?",
-    "4. **Breaking changes** — Will the changes break existing functionality? Check types, exports, API contracts.",
-    "5. **Test coverage** — Are the proposed tests sufficient? Missing test cases?",
-    "",
-    "Read the files mentioned in the plan (use grep/head/tail — be concise). Verify the plan's assumptions.",
-    "",
-    "Output your critique in this format:",
-    "```",
-    "VERDICT: APPROVE or REVISE",
-    "",
-    "## Issues found (if any)",
-    "- [CRITICAL] description (file:line)",
-    "- [MAJOR] description",
-    "- [MINOR] description",
-    "",
-    "## Suggested changes to the plan",
-    "- Change step N to: ...",
-    "- Add step: ...",
-    "```",
-    "",
-    "If the plan is sound, output VERDICT: APPROVE with no changes needed.",
-    "If there are issues, output VERDICT: REVISE with specific corrections.",
-    "",
-    "Be concise. Target your reads — only check files the plan mentions or that are clearly related.",
-    "Call activity/action with your critique when done. Do NOT use activity/response — that ends the session prematurely.",
-  ].join("\n");
-}
 
-function buildFixPhaseMessage(reviewOutput: string): string {
-  return [
-    "You are in the FIX phase. A PR review found issues with your changes:",
-    "",
-    reviewOutput,
-    "",
-    "---",
-    "## INSTRUCTIONS — FIX PHASE",
-    "",
-    "Fix the issues listed above. Then commit the fixes.",
-    "Do NOT re-investigate or re-plan — just fix the specific issues.",
-    "",
-    "When done, post an activity/action with a summary of what you fixed. Do NOT use activity/response — that ends the session prematurely.",
-    "",
-    "Be concise in your tool usage.",
-  ].join("\n");
-}
 
-function truncateReview(output: string, maxChars = 8_000): string {
-  if (output.length <= maxChars) return output;
-  const head = output.slice(0, maxChars * 0.7);
-  const tail = output.slice(-maxChars * 0.3);
-  return `${head}\n\n... (truncated ${output.length - maxChars} chars) ...\n\n${tail}`;
-}
 
 function shouldUseMultiPhase(action: string, prompt: string): boolean {
   // Only use multi-phase for "created" actions (new issues) with substantial prompts
@@ -482,7 +418,6 @@ async function handleAgentEvent(
       issueId,
       teamId,
       repoDir: repo,
-      repositories: cfg.repositories,
     });
   } else {
     api.logger.info?.(`linear handler: PLAIN message (no enrichment), enableApi=${enableApi}, apiToken=${apiToken ? "set" : "empty"}`);
@@ -572,49 +507,7 @@ async function handleAgentEvent(
         if (!planText || planText.length < 50) {
           agentError = "Planning phase produced no useful output";
         } else {
-          // Phase 2: CRITIQUE — adversarial review of the plan
-          const critiqueSessionKey = `${sessionKey}:critique`;
-          api.logger.info?.(`linear [phase=critique]: dispatching, sessionKey=${critiqueSessionKey}`);
-          postActivity(api, cfg, session, {
-            type: "thought",
-            body: "Reviewing plan for issues…",
-          }, { ephemeral: true }).catch(() => {});
-
-          let effectivePlan = planText;
-          try {
-            const critiqueResult = await call({
-              method: "agent",
-              params: {
-                message: buildCritiquePhaseMessage(planText),
-                sessionKey: critiqueSessionKey,
-                label: `${label} [critique]`,
-                idempotencyKey: `${idem}-critique`,
-              },
-              expectFinal: true,
-              timeoutMs: PHASE_TIMEOUT_MS,
-            });
-            const critiqueText = buildAgentResponse(critiqueResult);
-            api.logger.info?.(`linear [phase=critique]: completed, textLen=${critiqueText?.length ?? 0}`);
-            // Intermediate phase — clear response flag so final response isn't suppressed
-            if (session) clearResponseFlag(session);
-
-            // If critique suggests revisions, fold them into the plan
-            if (critiqueText && critiqueText.includes("VERDICT: REVISE")) {
-              api.logger.info?.(`linear [phase=critique]: plan needs revision, merging critique`);
-              postActivity(api, cfg, session, {
-                type: "thought",
-                body: "Plan revised based on review feedback.",
-              }, { ephemeral: true }).catch(() => {});
-              effectivePlan = planText + "\n\n---\n## Critique Feedback (MUST ADDRESS)\n" + critiqueText;
-            } else {
-              api.logger.info?.(`linear [phase=critique]: plan approved`);
-            }
-          } catch (critiqueErr) {
-            // Critique failure is non-fatal — proceed with original plan
-            api.logger.warn?.(`linear [phase=critique]: failed, proceeding with original plan: ${critiqueErr instanceof Error ? critiqueErr.message : String(critiqueErr)}`);
-          }
-
-          // Phase 3: EXEC — execute the (possibly revised) plan with fresh context
+          // Phase 2: EXEC — execute the plan with fresh context
           const execSessionKey = `${sessionKey}:exec`;
           api.logger.info?.(`linear [phase=exec]: dispatching, sessionKey=${execSessionKey}`);
           postActivity(api, cfg, session, {
@@ -632,9 +525,9 @@ async function handleAgentEvent(
                 prompt: "",
                 repo, session, context,
                 compact: false,
-                apiBaseUrl: execApiBaseUrl, apiToken, issueId, teamId, repoDir: repo, repositories: cfg.repositories,
-              }) + "\n\n---\n" + buildExecPhaseMessage(effectivePlan)
-            : buildExecPhaseMessage(effectivePlan);
+                apiBaseUrl: execApiBaseUrl, apiToken, issueId, teamId, repoDir: repo,
+              }) + "\n\n---\n" + buildExecPhaseMessage(planText)
+            : buildExecPhaseMessage(planText);
 
           const execResult = await call({
             method: "agent",
@@ -652,78 +545,6 @@ async function handleAgentEvent(
           // Clear response flag — the exec agent may have posted activity/response,
           // but the handler should still post the final response after all phases complete.
           if (session) clearResponseFlag(session);
-
-          // Phase 4: REVIEW — run claude pr/review on the diff, fix if needed
-          if (repo && !agentError) {
-            const effectiveDir = getEffectiveDir({ repoDir: repo, issueIdentifier: id, issueTitle: title });
-            if (effectiveDir) {
-              try {
-                api.logger.info?.(`linear [phase=review]: running PR review on ${effectiveDir}`);
-                postActivity(api, cfg, session, {
-                  type: "thought",
-                  body: "Running code review…",
-                }, { ephemeral: true }).catch(() => {});
-
-                const MAX_REVIEW_ROUNDS = 5;
-                for (let round = 1; round <= MAX_REVIEW_ROUNDS; round++) {
-                  const review = await runClaudePrReview(effectiveDir);
-                  api.logger.info?.(`linear [phase=review]: round ${round}, ok=${review.ok}, outputLen=${review.output.length}`);
-
-                  if (!review.ok) {
-                    api.logger.warn?.(`linear [phase=review]: review failed: ${review.error}`);
-                    break;
-                  }
-
-                  const reviewText = truncateReview(review.output);
-                  const hasIssues = /\b(critical|important|must.?fix|should.?fix)\b/i.test(reviewText)
-                    && !/\b(0 critical|no critical|no important)\b/i.test(reviewText);
-
-                  if (hasIssues && round < MAX_REVIEW_ROUNDS) {
-                    // Issues found — post status to Linear, dispatch fix agent
-                    postActivity(api, cfg, session, {
-                      type: "action",
-                      action: "reviewed",
-                      parameter: `round ${round}`,
-                      result: `⚠️ Issues found, fixing...`,
-                    }).catch(() => {});
-
-                    const fixSessionKey = `${sessionKey}:fix-${round}`;
-                    api.logger.info?.(`linear [phase=fix]: dispatching round ${round}, sessionKey=${fixSessionKey}`);
-
-                    const fixResult = await call({
-                      method: "agent",
-                      params: {
-                        message: buildFixPhaseMessage(reviewText),
-                        sessionKey: fixSessionKey,
-                        label: `${label} [fix-${round}]`,
-                        idempotencyKey: `${idem}-fix-${round}`,
-                      },
-                      expectFinal: true,
-                      timeoutMs: PHASE_TIMEOUT_MS,
-                    });
-                    const fixText = buildAgentResponse(fixResult);
-                    api.logger.info?.(`linear [phase=fix]: round ${round} completed, textLen=${fixText?.length ?? 0}`);
-                    // Intermediate phase — clear response flag so final response isn't suppressed
-                    if (session) clearResponseFlag(session);
-                  } else {
-                    // Clean review or max rounds reached
-                    const verdict = hasIssues ? "issues remain (max rounds reached)" : "passed";
-                    postActivity(api, cfg, session, {
-                      type: "action",
-                      action: "reviewed",
-                      parameter: `${round} round${round > 1 ? "s" : ""}`,
-                      result: hasIssues ? "⚠️ Review complete (some issues remain)" : "✅ Code review passed",
-                    }).catch(() => {});
-                    api.logger.info?.(`linear [phase=review]: done — ${verdict}, rounds=${round}`);
-                    break;
-                  }
-                }
-              } catch (reviewErr) {
-                // Review failure is non-fatal
-                api.logger.warn?.(`linear [phase=review]: failed: ${reviewErr instanceof Error ? reviewErr.message : String(reviewErr)}`);
-              }
-            }
-          }
         }
       } else {
         // ── Single-phase dispatch (for prompted/follow-ups) ──
@@ -762,16 +583,6 @@ async function handleAgentEvent(
     // If the agent explicitly posted a response via the API, skip auto-post.
     if (hasAgentResponse) {
       clearResponseFlag(session);
-      // Still run post-completion tasks
-      if (session && repo) {
-        autolinkPRToIssue(api, cfg, {
-          sessionId: session,
-          issueId,
-          issueIdentifier: id,
-          issueTitle: title,
-          repoDir: repo,
-        }).catch((e) => api.logger.warn?.(`linear: autolinkPR failed: ${e instanceof Error ? e.message : String(e)}`));
-      }
       // Auto-close issue if agent ran on a "created" action and completed without error
       if (action === "created" && issueId && !agentError && resolveFlag(cfg.closeOnComplete, true)) {
         autoCloseIssue(api, cfg, issueId).catch((e) => api.logger.warn?.(`linear: autoCloseIssue failed: ${e instanceof Error ? e.message : String(e)}`));
@@ -805,17 +616,6 @@ async function handleAgentEvent(
     }
 
     // ── Post-completion tasks (after response is posted) ──
-
-    // Auto-detect and link any PRs created during the agent run
-    if (session && repo) {
-      autolinkPRToIssue(api, cfg, {
-        sessionId: session,
-        issueId,
-        issueIdentifier: id,
-        issueTitle: title,
-        repoDir: repo,
-      }).catch((e) => api.logger.warn?.(`linear: autolinkPR failed: ${e instanceof Error ? e.message : String(e)}`));
-    }
 
     // Auto-close issue if agent ran on a "created" action and completed without error
     if (action === "created" && issueId && !agentError && resolveFlag(cfg.closeOnComplete, true)) {

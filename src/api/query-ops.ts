@@ -87,12 +87,3 @@ registerApiHandler("/query/viewer", async ({ api, cfg, res }) => {
   sendJson(res, 200, { ok: true, data: { id } });
 });
 
-// POST /query/repositories — list known repositories from config
-registerApiHandler("/query/repositories", async ({ cfg, res }) => {
-  const repos = cfg.repositories;
-  if (!repos || Object.keys(repos).length === 0) {
-    sendJson(res, 200, { ok: true, data: {} });
-    return;
-  }
-  sendJson(res, 200, { ok: true, data: repos });
-});

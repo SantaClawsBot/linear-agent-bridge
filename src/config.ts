@@ -28,11 +28,7 @@ export function normalizeCfg(
     mentionHandle: readCfgString(cfg, "mentionHandle"),
     apiCorsOrigins: readCfgStringArray(cfg, "apiCorsOrigins"),
     apiCorsAllowCredentials: readCfgBool(cfg, "apiCorsAllowCredentials"),
-    branchPrefix: readCfgString(cfg, "branchPrefix"),
-    prReportToLinear: readCfgBool(cfg, "prReportToLinear"),
-    githubWebhookSecret: readCfgString(cfg, "githubWebhookSecret"),
     closeOnComplete: readCfgBool(cfg, "closeOnComplete"),
-    repositories: readCfgRepositories(cfg, "repositories"),
   };
 }
 
@@ -85,21 +81,3 @@ function readCfgStringArray(
   return values.length > 0 ? values : undefined;
 }
 
-function readCfgRepositories(
-  cfg: Record<string, unknown>,
-  key: string,
-): Record<string, { cloneUrl: string; dir?: string }> | undefined {
-  const raw = cfg[key];
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
-  const map = raw as Record<string, unknown>;
-  const out: Record<string, { cloneUrl: string; dir?: string }> = {};
-  for (const [k, v] of Object.entries(map)) {
-    if (!v || typeof v !== "object" || Array.isArray(v)) continue;
-    const obj = v as Record<string, unknown>;
-    const cloneUrl = typeof obj.cloneUrl === "string" ? obj.cloneUrl.trim() : "";
-    if (!cloneUrl) continue;
-    const dir = typeof obj.dir === "string" ? obj.dir.trim() : undefined;
-    out[k] = { cloneUrl, ...(dir ? { dir } : {}) };
-  }
-  return Object.keys(out).length > 0 ? out : undefined;
-}

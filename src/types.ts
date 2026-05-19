@@ -45,23 +45,8 @@ export interface PluginConfig {
   mentionHandle?: string;
   apiCorsOrigins?: string[];
   apiCorsAllowCredentials?: boolean;
-  /** Branch name prefix for PR branches (default: "linear") */
-  branchPrefix?: string;
-  /** Auto-post PR URL to Linear session as external URL + activity */
-  prReportToLinear?: boolean;
-  /** Auto-run Claude PR review before pushing (default: true). Set false to skip. */
-  prAutoReview?: boolean;
-  /** GitHub webhook secret for PR review events (X-Hub-Signature-256) */
-  githubWebhookSecret?: string;
   /** Auto-close issue to "completed" when agent finishes successfully on a "created" action (default: true) */
   closeOnComplete?: boolean;
-  /**
-   * Known repositories the agent can work in.
-   * Map of repo short-name → { cloneUrl, dir? }.
-   * If `dir` is set, the repo is expected to already be cloned there.
-   * If `dir` is omitted, the agent should clone it to a temp directory.
-   */
-  repositories?: Record<string, { cloneUrl: string; dir?: string }>;
 }
 
 
