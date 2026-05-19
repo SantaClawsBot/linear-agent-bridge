@@ -212,6 +212,16 @@ function shouldUseMultiPhase(action: string, prompt: string): boolean {
 // Maps session ID → timestamp when marked inflight.
 const inflightSessions = new Map<string, number>();
 const DEDUP_WINDOW_MS = 5_000;
+const INFLIGHT_STALE_MS = 60 * 60 * 1000; // 1 hour -- anything older is definitely stale
+
+// Periodic sweep: clear inflight entries that are older than INFLIGHT_STALE_MS.
+// This prevents permanent blocks if a session's cleanup path throws before deletion.
+setInterval(() => {
+  const cutoff = Date.now() - INFLIGHT_STALE_MS;
+  for (const [key, ts] of inflightSessions) {
+    if (ts < cutoff) inflightSessions.delete(key);
+  }
+}, 5 * 60 * 1000).unref?.();
 
 export function createLinearWebhook(
   api: OpenClawPluginApi,
@@ -770,13 +780,18 @@ async function handleAgentEvent(
     }
 
     // ── Post agent response or error to Linear ──
+    // ALWAYS post activity/response — it's the only way to end the Linear session.
     if (agentError) {
-      // Dispatch itself failed — post error activity
+      // Dispatch itself failed — post error AND response (error alone doesn't end session)
       api.logger.info?.(`linear: posting dispatch error to Linear, session=${session ? session.slice(0, 8) + "..." : "(none)"}`);
       await postActivity(api, cfg, session, {
         type: "error",
         body: `Agent dispatch failed: ${agentError}`,
       }).catch((e) => api.logger.warn?.(`linear: failed to post error to Linear: ${e instanceof Error ? e.message : String(e)}`));
+      await postActivity(api, cfg, session, {
+        type: "response",
+        body: `Agent stopped due to error: ${agentError}`,
+      }).catch((e) => api.logger.warn?.(`linear: failed to post response to Linear: ${e instanceof Error ? e.message : String(e)}`));
     } else if (agentText && agentText !== "Agent completed with no reply.") {
       api.logger.info?.(`linear: posting agent response to Linear, session=${session ? session.slice(0, 8) + "..." : "(none)"}, textLen=${agentText.length}`);
       await postActivity(api, cfg, session, { type: "response", body: agentText }).catch((e) => api.logger.warn?.(`linear: failed to post response to Linear: ${e instanceof Error ? e.message : String(e)}`));
@@ -813,11 +828,19 @@ async function handleAgentEvent(
     if (session) clearResponseFlag(session);
     const msg = err instanceof Error ? err.message : String(err);
     api.logger.warn?.(`linear agent run failed: ${msg}`);
+    // Post both an error AND a response to ensure the session ends.
+    // activity/error alone does not end the Linear session — only activity/response does.
     postActivity(api, cfg, session, {
       type: "error",
       body: `Agent run failed: ${msg}`,
     }).catch((postErr) => {
       api.logger.warn?.(`linear: failed to post error to Linear: ${postErr instanceof Error ? postErr.message : String(postErr)}`);
+    });
+    postActivity(api, cfg, session, {
+      type: "response",
+      body: `Agent run failed: ${msg}`,
+    }).catch((postErr) => {
+      api.logger.warn?.(`linear: failed to post response to Linear: ${postErr instanceof Error ? postErr.message : String(postErr)}`);
     });
   }
 }

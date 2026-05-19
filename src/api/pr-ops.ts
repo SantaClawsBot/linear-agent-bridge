@@ -18,7 +18,6 @@ function resolveDir(
   return dir || context.repoDir;
 }
 import { formatConventionalTitle } from "../agent/repo-conventions.js";
-import { markResponsePosted } from "../agent/response-tracker.js";
 import { addSessionPR, getSessionPRs } from "../agent/pr-tracker.js";
 import type { OpenClawPluginApi } from "../types.js";
 import { execFile, spawn } from "node:child_process";
@@ -358,7 +357,7 @@ registerApiHandler(
       // Clean up the worktree after successful PR creation
       await cleanupWorktree(api, repoDir, overrideContext.issueIdentifier, overrideContext.issueTitle, branch);
 
-      // Auto-post a response activity
+      // Auto-post a PR-created action activity (not activity/response — that ends the session)
       if (cfg.prReportToLinear !== false && context.sessionId) {
         const allPRs = getSessionPRs(context.sessionId);
         const isMultiRepo = allPRs.length > 1;
@@ -366,16 +365,15 @@ registerApiHandler(
           ? `${allPRs.length} PRs created:\n${allPRs.map(p => `- [${p.title}](${p.prUrl}) (${p.repoName})`).join("\n")}`
           : `PR created: [${title}](${prUrl})`;
         await postActivity(api, cfg, context.sessionId, {
-          type: "response",
-          body: respBody,
+          type: "action",
+          action: "pr-created",
+          parameter: isMultiRepo ? `${allPRs.length} PRs` : `PR #${prNumber}`,
+          result: respBody,
         }).catch((e) =>
-          api.logger.warn?.(`linear: failed to post PR response activity: ${e instanceof Error ? e.message : String(e)}`),
+          api.logger.warn?.(`linear: failed to post PR activity: ${e instanceof Error ? e.message : String(e)}`),
         );
-        // Only mark response posted on the final PR — the agent may have more repos to process
-        // We let the agent decide when to stop by not auto-marking for multi-repo
-        if (!isMultiRepo) {
-          markResponsePosted(context.sessionId);
-        }
+        // Do NOT post activity/response or markResponsePosted here — that ends the session.
+        // The handler posts the final activity/response when the agent run completes.
       }
 
       const allSessionPRs = context.sessionId ? getSessionPRs(context.sessionId) : [];
