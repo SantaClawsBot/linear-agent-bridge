@@ -123,7 +123,7 @@ Post activities to the Linear session to communicate with users.
 { action: "activity/elicitation", body: "question", signal?: "select", signalMeta?: { options: [{ value: "..." }] } }
 When using signal: "select", present options for the user to choose from.
 
-**action: "activity/response"** — Post a final response (marks session as complete)
+**action: \"activity/response\"** — Post a final response. ONLY use this when you are completely done and ready to hand back to the user — it ends the session and Linear will no longer show you as working.
 { action: "activity/response", body: "markdown text" }
 
 **action: "activity/error"** — Report an error
@@ -278,7 +278,7 @@ ${codeBlock("json", '{ action: "activity/action", activityAction: "reading", par
 - Reference issues via URLs: https://linear.app/TEAM/issue/IDENTIFIER — they render as mentions
 - Do not use web_fetch or web_search for URLs containing "/resources/articles" (skip those links)
 - Use elicitation with the "select" signal to present options to the user
-- Post a response activity when your work is complete
+- Post a response activity ONLY when your work is complete — it ends the session
 
 ### Context Budget — CRITICAL
 

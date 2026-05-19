@@ -82,6 +82,7 @@ registerApiHandler("/activity/error", async ({ api, cfg, context, body, res }) =
     type: "error",
     body: text,
   });
-  markResponsePosted(context.sessionId);
+  // Do NOT markResponsePosted — error does not end the session.
+  // Only activity/response should mark the session as complete.
   sendJson(res, 200, { ok: true });
 });

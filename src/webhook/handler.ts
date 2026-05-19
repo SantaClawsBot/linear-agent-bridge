@@ -96,7 +96,7 @@ const PHASE_PLAN_PROMPT_SUFFIX = [
   "2. Identify exactly which files need to change and how.",
   "3. Output a plan as a structured markdown block.",
   "",
-  "IMPORTANT: When you are done, call the activity/response action with your plan. Do NOT implement anything yet.",
+  "IMPORTANT: When you are done, call the activity/action action with your plan. Do NOT implement anything yet. Do NOT use activity/response — that ends the session prematurely.",
   "Your plan will be handed to a fresh agent session for implementation.",
   "",
   "Use this format for your response:",
@@ -128,7 +128,7 @@ function buildExecPhaseMessage(plan: string): string {
     "1. Create branches, edit files, commit changes as needed.",
     "2. Run tests to verify.",
     "3. If a PR workflow is available, create the PR.",
-    "4. When done, post a response activity with a summary of what you did.",
+    "4. When done, post an activity/action with a summary of what you did. Do NOT use activity/response — the system will post the final response.",
     "",
     "Be concise in your tool usage — use targeted reads (grep, sed, head) not whole-file cats.",
   ].join("\n");
@@ -171,7 +171,7 @@ function buildCritiquePhaseMessage(plan: string): string {
     "If there are issues, output VERDICT: REVISE with specific corrections.",
     "",
     "Be concise. Target your reads — only check files the plan mentions or that are clearly related.",
-    "Call activity/response with your critique when done.",
+    "Call activity/action with your critique when done. Do NOT use activity/response — that ends the session prematurely.",
   ].join("\n");
 }
 
@@ -187,7 +187,7 @@ function buildFixPhaseMessage(reviewOutput: string): string {
     "Fix the issues listed above. Then commit the fixes.",
     "Do NOT re-investigate or re-plan — just fix the specific issues.",
     "",
-    "When done, post a response activity with a summary of what you fixed.",
+    "When done, post an activity/action with a summary of what you fixed. Do NOT use activity/response — that ends the session prematurely.",
     "",
     "Be concise in your tool usage.",
   ].join("\n");
@@ -555,6 +555,9 @@ async function handleAgentEvent(
         });
         const planText = buildAgentResponse(planResult);
         api.logger.info?.(`linear [phase=plan]: completed, textLen=${planText?.length ?? 0}`);
+        // Intermediate phases may have posted activity/response despite instructions
+        // not to — clear the flag so the final response from the handler is posted.
+        if (session) clearResponseFlag(session);
 
         if (!planText || planText.length < 50) {
           agentError = "Planning phase produced no useful output";
@@ -582,6 +585,8 @@ async function handleAgentEvent(
             });
             const critiqueText = buildAgentResponse(critiqueResult);
             api.logger.info?.(`linear [phase=critique]: completed, textLen=${critiqueText?.length ?? 0}`);
+            // Intermediate phase — clear response flag so final response isn't suppressed
+            if (session) clearResponseFlag(session);
 
             // If critique suggests revisions, fold them into the plan
             if (critiqueText && critiqueText.includes("VERDICT: REVISE")) {
@@ -634,6 +639,9 @@ async function handleAgentEvent(
           });
           agentText = buildAgentResponse(execResult);
           api.logger.info?.(`linear [phase=exec]: completed, textLen=${agentText?.length ?? 0}`);
+          // Clear response flag — the exec agent may have posted activity/response,
+          // but the handler should still post the final response after all phases complete.
+          if (session) clearResponseFlag(session);
 
           // Phase 4: REVIEW — run claude pr/review on the diff, fix if needed
           if (repo && !agentError) {
@@ -685,6 +693,8 @@ async function handleAgentEvent(
                     });
                     const fixText = buildAgentResponse(fixResult);
                     api.logger.info?.(`linear [phase=fix]: round ${round} completed, textLen=${fixText?.length ?? 0}`);
+                    // Intermediate phase — clear response flag so final response isn't suppressed
+                    if (session) clearResponseFlag(session);
                   } else {
                     // Clean review or max rounds reached
                     const verdict = hasIssues ? "issues remain (max rounds reached)" : "passed";
