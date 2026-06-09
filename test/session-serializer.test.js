@@ -8,7 +8,7 @@ import {
 
 const api = { logger: { info() {}, warn() {} } };
 
-test("serializer drops a duplicate prompted within the dedup window", async () => {
+test("serializer drops an exact duplicate delivery id", async () => {
   clearSerializerForTesting();
   let runs = 0;
   let release;
@@ -19,86 +19,55 @@ test("serializer drops a duplicate prompted within the dedup window", async () =
     runs += 1;
     await gate;
   };
-  // type "Comment" maps to action "prompted"; agentSessionId provides the key.
-  const data = { agentSessionId: "S", type: "Comment", action: "create" };
-  const p1 = runSerialized(api, {}, data, undefined, run); // starts, awaits gate
-  await runSerialized(api, {}, { ...data }, undefined, run); // duplicate -> dropped
+  const data = { agentSessionId: "S", type: "AgentSessionEvent", action: "prompted" };
+  const p1 = runSerialized(api, {}, data, "D1", run); // runs, awaits gate
+  await runSerialized(api, {}, { ...data }, "D1", run); // same delivery id -> dropped
   assert.equal(runs, 1);
   release();
   await p1;
   assert.equal(runs, 1);
 });
 
-test("serializer drops a duplicate created within the dedup window", async () => {
-  clearSerializerForTesting();
-  let runs = 0;
-  let release;
-  const gate = new Promise((r) => {
-    release = r;
-  });
-  const run = async () => {
-    runs += 1;
-    await gate;
-  };
-  const data = { agentSessionId: "S", type: "AgentSessionEvent", action: "created" };
-  const p1 = runSerialized(api, {}, data, undefined, run); // starts, awaits gate
-  await runSerialized(api, {}, { ...data }, undefined, run); // duplicate created -> dropped
-  assert.equal(runs, 1);
-  release();
-  await p1;
-  assert.equal(runs, 1);
-});
-
-test("serializer drops a prompted Comment-on-creation while a created is active", async () => {
-  clearSerializerForTesting();
-  let runs = 0;
-  let release;
-  const gate = new Promise((r) => {
-    release = r;
-  });
-  const run = async () => {
-    runs += 1;
-    await gate;
-  };
-  const created = { agentSessionId: "S", type: "AgentSessionEvent", action: "created" };
-  const promptedComment = { agentSessionId: "S", type: "Comment", action: "create" };
-  const p1 = runSerialized(api, {}, created, undefined, run); // created starts, awaits gate
-  await runSerialized(api, {}, promptedComment, undefined, run); // Comment(prompted) within window -> dropped
-  assert.equal(runs, 1);
-  release();
-  await p1;
-  assert.equal(runs, 1);
-});
-
-test("serializer queues a different-action event and runs it after the first", async () => {
+test("serializer queues a genuine fast follow-up (distinct delivery) instead of dropping it", async () => {
   clearSerializerForTesting();
   const order = [];
   let release1;
   const gate1 = new Promise((r) => {
     release1 = r;
   });
-  // A genuine "created" racing a "prompted" Comment that started first must NOT
-  // be dropped — it is queued and run after.
-  const first = { agentSessionId: "S", type: "Comment", action: "create", _id: "p" };
-  const second = { agentSessionId: "S", type: "AgentSessionEvent", action: "created", _id: "c" };
+  // A real user follow-up sent moments after the run starts must NOT be lost.
+  const mk = (id) => ({ agentSessionId: "S", type: "AgentSessionEvent", action: "prompted", _id: id });
   const run = async (_a, _c, d) => {
     order.push(`start:${d._id}`);
-    if (d._id === "p") await gate1;
+    if (d._id === 1) await gate1;
     order.push(`end:${d._id}`);
   };
-  const p1 = runSerialized(api, {}, first, undefined, run); // prompted starts, awaits gate1
-  runSerialized(api, {}, second, undefined, run); // created -> queued (different action)
+  const p1 = runSerialized(api, {}, mk(1), "D1", run); // first prompted runs, awaits
+  runSerialized(api, {}, mk(2), "D2", run); // distinct delivery -> QUEUED, not dropped
   assert.equal(getSerializerDepth("S"), 1);
   release1();
-  await p1; // drains: finishes prompted, then runs created
-  assert.deepEqual(order, ["start:p", "end:p", "start:c", "end:c"]);
+  await p1; // drains: finishes 1, then runs 2
+  assert.deepEqual(order, ["start:1", "end:1", "start:2", "end:2"]);
 });
 
-test("serializer with no session id runs directly", async () => {
+test("serializer runs a session-less event directly", async () => {
   clearSerializerForTesting();
   let ran = false;
-  await runSerialized(api, {}, { type: "AgentSessionEvent", action: "created" }, undefined, async () => {
+  await runSerialized(api, {}, { type: "AgentSessionEvent", action: "created" }, "D9", async () => {
     ran = true;
   });
   assert.equal(ran, true);
+});
+
+test("serializer never dedupes undefined delivery ids", async () => {
+  clearSerializerForTesting();
+  let runs = 0;
+  // No session + undefined delivery: both must run (undefined is not a dedup key).
+  await runSerialized(api, {}, { type: "X" }, undefined, async () => {
+    runs += 1;
+  });
+  await runSerialized(api, {}, { type: "X" }, undefined, async () => {
+    runs += 1;
+  });
+  assert.equal(runs, 2);
 });

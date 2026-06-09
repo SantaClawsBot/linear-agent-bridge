@@ -4,9 +4,16 @@
 // possibly-wrong repo. The user's answer arrives as a separate "prompted"
 // event, at which point the cached choice is consumed.
 
-interface PendingRepo {
+export interface PendingRepoChoice {
   dir: string;
   repoName: string;
+  /** The original webhook event that asked for confirmation, so the real work
+   *  request (full issue context, multi-phase) can be resumed on the answer —
+   *  rather than running from the bare "yes"/"no" reply. */
+  originalData: Record<string, unknown>;
+}
+
+interface PendingRepo extends PendingRepoChoice {
   expiresAt: number;
 }
 
@@ -15,12 +22,13 @@ const PENDING_TTL_MS = 6 * 60 * 60 * 1000;
 
 export function setPendingRepo(
   sessionId: string,
-  repo: { dir: string; repoName: string },
+  choice: PendingRepoChoice,
 ): void {
   if (!sessionId) return;
   pendingBySession.set(sessionId, {
-    dir: repo.dir,
-    repoName: repo.repoName,
+    dir: choice.dir,
+    repoName: choice.repoName,
+    originalData: choice.originalData,
     expiresAt: Date.now() + PENDING_TTL_MS,
   });
 }
@@ -38,12 +46,12 @@ export function hasPendingRepo(sessionId: string): boolean {
 /** Consume the pending choice (removes it). Returns undefined if none/expired. */
 export function takePendingRepo(
   sessionId: string,
-): { dir: string; repoName: string } | undefined {
+): PendingRepoChoice | undefined {
   const entry = pendingBySession.get(sessionId);
   if (!entry) return undefined;
   pendingBySession.delete(sessionId);
   if (entry.expiresAt <= Date.now()) return undefined;
-  return { dir: entry.dir, repoName: entry.repoName };
+  return { dir: entry.dir, repoName: entry.repoName, originalData: entry.originalData };
 }
 
 export function clearPendingRepo(sessionId: string): void {

@@ -455,7 +455,9 @@ async function handleAgentEvent(
   const prompt = resolvePrompt(data);
   if (action === "prompted") {
     const skipReason = shouldSkipPromptedRun(prompt);
-    if (skipReason) {
+    // Don't skip an answer to a pending repo confirmation even if its body looks
+    // empty/echo-like — it must still resume the original parked work request.
+    if (skipReason && !hasPendingRepo(resolveSessionId(data))) {
       api.logger.info?.(
         `linear prompted event ignored (${skipReason})`,
       );
@@ -516,27 +518,48 @@ async function handleAgentEvent(
 
   markCurrentRunActive();
 
-  // Resolve repo. If this prompted event is the user answering a previous
-  // low-confidence repo confirmation, consume that cached choice rather than
-  // resolving again (which would just re-ask the same question and loop).
+  // Resolve repo. Two special cases come first:
+  //  1. This run is the re-dispatch of an original request after the user
+  //     confirmed the repo (it carries the __repoConfirmed marker) — use the
+  //     decided repo and skip resolution/gating so we never re-ask.
+  //  2. This prompted event IS the user's answer to a pending confirmation —
+  //     re-dispatch the ORIGINAL request (full issue context, multi-phase) with
+  //     the repo decided, rather than running from the bare "yes"/"no" reply.
   let repo = staticRepo;
   let repoResolution: { repoName?: string; confidence?: number; needsConfirmation?: boolean } | undefined;
-  let repoConfirmationAnswered = false;
-  if (action === "prompted" && session && hasPendingRepo(session)) {
+  const repoConfirmed = data.__repoConfirmed === true;
+  if (repoConfirmed) {
+    const confirmedDir = readString(data.__confirmedRepoDir as string);
+    if (confirmedDir) repo = confirmedDir;
+    // else: declined / no auto repo — keep staticRepo (may be empty).
+  } else if (action === "prompted" && session && hasPendingRepo(session)) {
     const pending = takePendingRepo(session)!;
-    repoConfirmationAnswered = true;
-    if (isAffirmativeRepoAnswer(prompt)) {
-      repo = pending.dir;
-      api.logger.info?.(`${prefix}linear: repo confirmation accepted → ${pending.repoName}`);
-    } else {
-      api.logger.info?.(`${prefix}linear: repo confirmation declined for ${pending.repoName}; proceeding without an auto-resolved repo`);
-      // repo stays staticRepo (possibly empty) — the agent can ask or use defaults.
-    }
+    const affirmative = isAffirmativeRepoAnswer(prompt);
+    api.logger.info?.(
+      `${prefix}linear: repo confirmation ${affirmative ? "accepted" : "declined"} for ${pending.repoName}; resuming the original request`,
+    );
+    // End this lightweight answer run and re-run the ORIGINAL created event so
+    // the agent works the real issue with full context — not the "yes" reply.
+    if (session) inflightSessions.delete(session);
+    unregisterCurrentRun();
+    const resumeData = {
+      ...pending.originalData,
+      __repoConfirmed: true,
+      __confirmedRepoDir: affirmative ? pending.dir : "",
+    };
+    const { enqueueAgentRun } = await import("./concurrency.js");
+    const { runSerialized } = await import("./session-serializer.js");
+    // delivery=undefined so the serializer's delivery-id dedup doesn't treat the
+    // re-dispatch as a duplicate of the confirmation webhook.
+    enqueueAgentRun(api, cfg, resumeData, undefined, (a, c, d, del) =>
+      runSerialized(a, c, d, del, handleAgentEvent),
+    );
+    return;
   }
 
-  // Try GitHub org-based auto-resolution if configured (and we didn't just
-  // resolve via a confirmation answer); otherwise fall back to static mapping.
-  if (!repoConfirmationAnswered && cfg.githubOrg && !staticRepo && session && issueId) {
+  // Try GitHub org-based auto-resolution if configured (and the repo wasn't
+  // already decided via confirmation); otherwise fall back to static mapping.
+  if (!repoConfirmed && cfg.githubOrg && !staticRepo && session && issueId) {
     try {
       const resolved = await resolveRepoWithOrg(api, cfg, issueId, session, staticRepo, team, proj);
       repo = resolved.dir;
@@ -618,7 +641,7 @@ async function handleAgentEvent(
       // STOP this run — do not dispatch the agent into a possibly-wrong repo.
       // The user's answer arrives as a prompted event and is consumed at the
       // top of the next run (repoConfirmationAnswered).
-      setPendingRepo(session, { dir: repo, repoName: repoResolution.repoName });
+      setPendingRepo(session, { dir: repo, repoName: repoResolution.repoName, originalData: data });
       postActivityFireAndForget(api, cfg, trace, session, {
         type: "elicitation",
         body: `I'm planning to work in ${repoResolution.repoName} (${pct}% confidence). Is this the right repository?`,

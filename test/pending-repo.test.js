@@ -8,12 +8,17 @@ import {
   isAffirmativeRepoAnswer,
 } from "../dist/src/webhook/pending-repo.js";
 
-test("pending repo can be set, observed, and consumed once", () => {
+test("pending repo round-trips the original event and is consumed once", () => {
   clearPendingRepo("s1");
+  const original = { type: "AgentSessionEvent", action: "created", agentSession: { id: "s1" } };
   assert.equal(hasPendingRepo("s1"), false);
-  setPendingRepo("s1", { dir: "/repo", repoName: "org/repo" });
+  setPendingRepo("s1", { dir: "/repo", repoName: "org/repo", originalData: original });
   assert.equal(hasPendingRepo("s1"), true);
-  assert.deepEqual(takePendingRepo("s1"), { dir: "/repo", repoName: "org/repo" });
+  const taken = takePendingRepo("s1");
+  assert.equal(taken.dir, "/repo");
+  assert.equal(taken.repoName, "org/repo");
+  // The original work request is preserved so it can be resumed after confirmation.
+  assert.deepEqual(taken.originalData, original);
   // Consumed — gone now.
   assert.equal(hasPendingRepo("s1"), false);
   assert.equal(takePendingRepo("s1"), undefined);
