@@ -1,4 +1,4 @@
-import { readObject, readString } from "../util.js";
+import { readArray, readObject, readString } from "../util.js";
 
 export interface MessageParams {
   action: string;
@@ -136,6 +136,27 @@ export function resolveSignal(data: Record<string, unknown>): string {
 
 export function resolveContext(data: Record<string, unknown>): string {
   return readString(data.promptContext as string) ?? "";
+}
+
+// Linear sends `guidance` on an AgentSessionEvent as an ARRAY of guidance-rule
+// objects (workspace/team instructions), not a plain string. Reading it as a
+// string silently drops it. Accept either shape and flatten rule bodies.
+export function resolveGuidance(data: Record<string, unknown>): string {
+  const direct = readString(data.guidance as string);
+  if (direct) return direct;
+  const list = readArray(data.guidance);
+  if (list.length === 0) return "";
+  const parts: string[] = [];
+  for (const entry of list) {
+    const obj = readObject(entry);
+    const body =
+      readString(obj?.body) ??
+      readString(obj?.content) ??
+      readString(obj?.text) ??
+      readString(entry);
+    if (body) parts.push(body);
+  }
+  return parts.join("\n");
 }
 
 export function resolveKey(input: unknown): string {

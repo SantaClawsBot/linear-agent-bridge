@@ -19,14 +19,29 @@ interface ActiveRunRecord {
   apiToken?: string;
   sessionKeys: Set<string>;
   canceledReason?: string;
+  canceledAt?: number;
 }
 
 const activeRunsByIssue = new Map<string, Map<string, ActiveRunRecord>>();
+
+// How long a canceled record is retained before being reaped. A canceled run
+// is expected to observe the flag and unregister itself well within this; the
+// reap is a backstop against runs that never finish (e.g. an orphaned dispatch
+// whose underlying agent cannot be aborted).
+const CANCELED_RETENTION_MS = 60 * 60 * 1000;
+
+// A canceled record is only treated as a stale leftover (safe to discard when a
+// new run registers) once it is older than this. This is comfortably longer
+// than the in-run gap between a run's two markCurrentRunActive() calls, so a
+// fresh cancel targeting the CURRENT run is never wiped out from under it.
+const CANCELED_STALE_MS = 30 * 1000;
 
 export function registerActiveRun(input: ActiveRunInput): void {
   const issueId = input.issueId.trim();
   const sessionId = input.sessionId.trim();
   if (!issueId || !sessionId) return;
+
+  reapCanceledRuns();
 
   let issueRuns = activeRunsByIssue.get(issueId);
   if (!issueRuns) {
@@ -35,6 +50,18 @@ export function registerActiveRun(input: ActiveRunInput): void {
   }
 
   let record = issueRuns.get(sessionId);
+  // A STALE leftover canceled record from a prior run must NOT taint a fresh
+  // run for the same issue+session (it would make the new run see itself as
+  // canceled). Replace it with a clean record. Only discard records canceled
+  // long enough ago to be leftovers — a fresh cancel belongs to the current
+  // run (which calls markCurrentRunActive twice) and must be preserved.
+  if (
+    record?.canceledReason &&
+    (record.canceledAt === undefined ||
+      Date.now() - record.canceledAt > CANCELED_STALE_MS)
+  ) {
+    record = undefined;
+  }
   if (!record) {
     record = {
       issueId,
@@ -70,9 +97,29 @@ export function cancelActiveRunsForIssue(
   const snapshots: ActiveRunSnapshot[] = [];
   for (const record of issueRuns.values()) {
     record.canceledReason = reason;
+    record.canceledAt = Date.now();
     snapshots.push(snapshot(record));
   }
   return snapshots;
+}
+
+/**
+ * Remove canceled records older than `maxAgeMs`. Backstop against orphaned runs
+ * that never unregister; also prevents a stale canceled record from lingering.
+ */
+export function reapCanceledRuns(maxAgeMs: number = CANCELED_RETENTION_MS): number {
+  const cutoff = Date.now() - maxAgeMs;
+  let removed = 0;
+  for (const [issueId, issueRuns] of activeRunsByIssue) {
+    for (const [sessionId, record] of issueRuns) {
+      if (record.canceledAt !== undefined && record.canceledAt < cutoff) {
+        issueRuns.delete(sessionId);
+        removed += 1;
+      }
+    }
+    if (issueRuns.size === 0) activeRunsByIssue.delete(issueId);
+  }
+  return removed;
 }
 
 export function isActiveRunCanceled(issueId: string, sessionId: string): boolean {

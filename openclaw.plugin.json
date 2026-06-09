@@ -113,7 +113,7 @@
 
       "closeOnComplete": {
         "type": "boolean",
-        "description": "Auto-close issue to 'completed' when agent finishes successfully on a 'created' action (default: true)"
+        "description": "When the agent finishes successfully on a 'created' action, move the issue to the team's 'review' workflow state (the first state whose name contains 'review') for human sign-off. No-op if the team has no such state. (default: true)"
       },
       "repositories": {
         "type": "object",
@@ -198,8 +198,8 @@
       "label": "API CORS allow credentials"
     },
     "closeOnComplete": {
-      "label": "Auto-close issue on agent completion",
-      "description": "Automatically move issue to 'completed' when agent finishes successfully on a 'created' action (default: true)"
+      "label": "Move issue to review on agent completion",
+      "description": "When the agent finishes successfully on a 'created' action, move the issue to the team's 'review' state for human sign-off (default: true)"
     },
     "maxConcurrent": {
       "label": "Max concurrent agent runs",

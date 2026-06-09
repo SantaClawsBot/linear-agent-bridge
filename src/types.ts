@@ -87,7 +87,7 @@ export interface PluginConfig {
   apiBaseUrl?: string;
   apiCorsOrigins?: string[];
   apiCorsAllowCredentials?: boolean;
-  /** Auto-close issue to "completed" when agent finishes successfully on a "created" action (default: true) */
+  /** When the agent finishes successfully on a "created" action, move the issue to the team's "review" workflow state for human sign-off (default: true) */
   closeOnComplete?: boolean;
   /** Maximum concurrent agent runs (default: 3) */
   maxConcurrent?: number;

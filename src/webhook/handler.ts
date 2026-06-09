@@ -37,6 +37,7 @@ import {
   resolvePrompt,
   resolveSignal,
   resolveContext,
+  resolveGuidance,
   resolveKey,
   resolveRepo,
   resolveExternal,
@@ -45,6 +46,12 @@ import { buildAgentResponse } from "./response-parser.js";
 import { applyIssuePolicy, resolveReviewState, resolveIssueInfo, updateIssue } from "./issue-policy.js";
 import { isCloseIntentPrompt, closeIssueFromPrompt } from "./close-intent.js";
 import { resolveRepoWithOrg } from "./repo-resolver.js";
+import {
+  hasPendingRepo,
+  takePendingRepo,
+  setPendingRepo,
+  isAffirmativeRepoAnswer,
+} from "./pending-repo.js";
 import { shouldSkipPromptedRun, isSelfAuthoredComment } from "./skip-filter.js";
 import { createSessionToken, revokeSessionToken } from "../agent/session-token.js";
 import { buildEnrichedMessage } from "../agent/context-builder.js";
@@ -75,7 +82,12 @@ async function autoCloseIssue(
     if (info.stateType === "completed" || info.stateType === "canceled") return;
     if (!info.teamId) return;
     const stateId = await resolveReviewState(api, cfg, info.teamId);
-    if (!stateId) return;
+    if (!stateId) {
+      api.logger.info?.(
+        `linear: closeOnComplete found no "review" workflow state for team; leaving issue ${issueId.slice(0, 8)}... unchanged`,
+      );
+      return;
+    }
     const ok = await updateIssue(api, cfg, info.id, { stateId }, "issueUpdate(autoClose)");
     if (ok) {
       api.logger.info?.(`linear: auto-moved issue to review ${issueId.slice(0, 8)}...`);
@@ -124,7 +136,11 @@ const PHASE_PLAN_PROMPT_SUFFIX = [
   "```",
 ].join("\n");
 
-function buildExecPhaseMessage(plan: string, compact: boolean): string {
+function buildExecPhaseMessage(
+  plan: string,
+  compact: boolean,
+  creds?: { apiToken: string; apiBaseUrl: string },
+): string {
   const sections = [
     "You are in the EXECUTION phase. A previous agent investigated the issue and produced this plan:",
     "",
@@ -141,17 +157,23 @@ function buildExecPhaseMessage(plan: string, compact: boolean): string {
     "",
     "Be concise in your tool usage — use targeted reads (grep, sed, head) not whole-file cats.",
   ];
-  // When compact (subagent mode), skip the full API docs.
-  // The subagent inherits the workspace and can use exec/gh CLI directly.
-  // For non-subagent (legacy) mode, the full API docs are prepended by the caller.
-  if (compact) {
+  // When compact (subagent mode), skip the full API docs and embed only a
+  // condensed reference. The subagent inherits the workspace and can use
+  // exec/gh CLI directly. For non-subagent (legacy) mode, the full API docs
+  // are prepended by the caller, so the compact section is omitted there.
+  //
+  // The per-session token and auto-detected base URL MUST be threaded in by
+  // the caller — there is no LINEAR_API_TOKEN/LINEAR_API_BASE_URL env var.
+  // Without a real token the subagent cannot reach the API proxy, so we omit
+  // the section entirely rather than hand it a non-working placeholder.
+  if (compact && creds?.apiToken) {
     sections.push(
       "",
       "## Linear API (compact)",
       "",
       "You can call the Linear API proxy to post activities and manage issues.",
-      `Endpoint: POST ${(process.env.LINEAR_API_BASE_URL || "http://127.0.0.1:8189/plugins/linear/api")}`,
-      `Authorization: Bearer ${(process.env.LINEAR_API_TOKEN || "(see your session token)")}`,
+      `Endpoint: POST ${creds.apiBaseUrl}`,
+      `Authorization: Bearer ${creds.apiToken}`,
       "Content-Type: application/json",
       "",
       "Key actions:",
@@ -310,7 +332,18 @@ export function createLinearWebhook(
     const secret = cfg.linearWebhookSecret;
     const sig = readHeader(req, "linear-signature");
     const delivery = readHeader(req, "linear-delivery");
-    if (secret && !verifySignature(secret, sig, raw)) {
+    // Fail closed: an unconfigured secret must NOT mean "accept anything".
+    // Without verification an attacker who can reach this URL could forge a
+    // webhook and drive an autonomous agent run. Reject until a secret is set.
+    if (!secret) {
+      api.logger.warn?.(
+        "linear webhook rejected: linearWebhookSecret is not configured — refusing to process unauthenticated webhooks. Set linearWebhookSecret to enable.",
+      );
+      res.statusCode = 401;
+      res.end("Unauthorized");
+      return;
+    }
+    if (!verifySignature(secret, sig, raw)) {
       res.statusCode = 401;
       res.end("Unauthorized");
       return;
@@ -395,9 +428,14 @@ async function handleWebhook(
   const trace = resolveTraceId(eventData, delivery, sessionId);
   const tracedEventData = { ...eventData, linearTraceId: trace };
   rememberSessionHint(tracedEventData, sessionId);
-  // Dispatch through concurrency limiter instead of calling handleAgentEvent directly.
+  // Dispatch through the concurrency limiter, wrapped by the per-session
+  // serializer so two events for the same session never run concurrently and
+  // corrupt the session-keyed in-process state.
   const { enqueueAgentRun } = await import("./concurrency.js");
-  enqueueAgentRun(api, cfg, tracedEventData, delivery, handleAgentEvent);
+  const { runSerialized } = await import("./session-serializer.js");
+  enqueueAgentRun(api, cfg, tracedEventData, delivery, (a, c, d, del) =>
+    runSerialized(a, c, d, del, handleAgentEvent),
+  );
 }
 
 async function handleAgentEvent(
@@ -418,7 +456,7 @@ async function handleAgentEvent(
   const title = readString(issue?.title) ?? "";
   const url = readString(issue?.url) ?? "";
   const desc = readString(issue?.description) ?? "";
-  const guidance = readString(data.guidance as string) ?? "";
+  const guidance = resolveGuidance(data);
   const prompt = resolvePrompt(data);
   if (action === "prompted") {
     const skipReason = shouldSkipPromptedRun(prompt);
@@ -483,11 +521,27 @@ async function handleAgentEvent(
 
   markCurrentRunActive();
 
-  // Resolve repo: try GitHub org-based auto-resolution if configured,
-  // otherwise fall back to static mapping.
+  // Resolve repo. If this prompted event is the user answering a previous
+  // low-confidence repo confirmation, consume that cached choice rather than
+  // resolving again (which would just re-ask the same question and loop).
   let repo = staticRepo;
   let repoResolution: { repoName?: string; confidence?: number; needsConfirmation?: boolean } | undefined;
-  if (cfg.githubOrg && !staticRepo && session && issueId) {
+  let repoConfirmationAnswered = false;
+  if (action === "prompted" && session && hasPendingRepo(session)) {
+    const pending = takePendingRepo(session)!;
+    repoConfirmationAnswered = true;
+    if (isAffirmativeRepoAnswer(prompt)) {
+      repo = pending.dir;
+      api.logger.info?.(`${prefix}linear: repo confirmation accepted → ${pending.repoName}`);
+    } else {
+      api.logger.info?.(`${prefix}linear: repo confirmation declined for ${pending.repoName}; proceeding without an auto-resolved repo`);
+      // repo stays staticRepo (possibly empty) — the agent can ask or use defaults.
+    }
+  }
+
+  // Try GitHub org-based auto-resolution if configured (and we didn't just
+  // resolve via a confirmation answer); otherwise fall back to static mapping.
+  if (!repoConfirmationAnswered && cfg.githubOrg && !staticRepo && session && issueId) {
     try {
       const resolved = await resolveRepoWithOrg(api, cfg, issueId, session, staticRepo, team, proj);
       repo = resolved.dir;
@@ -522,30 +576,12 @@ async function handleAgentEvent(
   const thought = buildThought(action, id, title);
   postActivityFireAndForget(api, cfg, trace, session, { type: "thought", body: thought }, { ephemeral: true });
 
-  // Post repo resolution status and ask for confirmation if confidence is low
-  if (repoResolution?.repoName && session) {
-    const pct = Math.round((repoResolution.confidence ?? 0) * 100);
-    const repoThought = `Resolved repo: ${repoResolution.repoName} (${pct}% confidence)`;
-    postActivityFireAndForget(api, cfg, trace, session, { type: "thought", body: repoThought });
-
-    if (repoResolution.needsConfirmation) {
-      postActivityFireAndForget(api, cfg, trace, session, {
-        type: "elicitation",
-        body: `I'm planning to work in ${repoResolution.repoName} (${pct}% confidence). Is this the right repository?`,
-      }, {
-        signal: "select",
-        signalMeta: {
-          options: [
-            { value: `Yes, use ${repoResolution.repoName}` },
-            { value: "No, let me specify a different repo" },
-          ],
-        },
-      });
-    }
-  }
-
-  // Fast-path for explicit close commands
-  if (isCloseIntentPrompt(prompt)) {
+  // Fast-path for explicit close commands — only on follow-up (prompted)
+  // messages. Checked BEFORE the repo-confirmation gate so an explicit "close
+  // this issue" is honoured immediately rather than being intercepted by a
+  // low-confidence repo question. A brand-new issue is a work request, never a
+  // close command, so we never short-circuit a "created" event into a close.
+  if (action === "prompted" && isCloseIntentPrompt(prompt)) {
     if (session) inflightSessions.delete(session);
     let closeText = "Не удалось определить задачу для закрытия.";
     try {
@@ -559,7 +595,9 @@ async function handleAgentEvent(
     return;
   }
 
-  // Apply issue policies on create
+  // Apply issue policies on create (start/delegate + external URL). This runs
+  // regardless of repo confirmation: the issue is ours and should be started
+  // and delegated even while we wait for the user to confirm the repository.
   if (action === "created") {
     const external = resolveExternal(cfg, session, issueId);
     if (external) {
@@ -570,6 +608,39 @@ async function handleAgentEvent(
     applyIssuePolicy(api, cfg, issueId).catch((err) => {
       api.logger.warn?.(`${prefix}linear: failed to apply issue policy: ${formatError(err)}`);
     });
+  }
+
+  // Repo resolution status + low-confidence confirmation GATE.
+  if (repoResolution?.repoName && session) {
+    const pct = Math.round((repoResolution.confidence ?? 0) * 100);
+    postActivityFireAndForget(api, cfg, trace, session, {
+      type: "thought",
+      body: `Resolved repo: ${repoResolution.repoName} (${pct}% confidence)`,
+    });
+
+    if (repoResolution.needsConfirmation) {
+      // Confidence is too low to act on blindly. Ask, remember the choice, and
+      // STOP this run — do not dispatch the agent into a possibly-wrong repo.
+      // The user's answer arrives as a prompted event and is consumed at the
+      // top of the next run (repoConfirmationAnswered).
+      setPendingRepo(session, { dir: repo, repoName: repoResolution.repoName });
+      postActivityFireAndForget(api, cfg, trace, session, {
+        type: "elicitation",
+        body: `I'm planning to work in ${repoResolution.repoName} (${pct}% confidence). Is this the right repository?`,
+      }, {
+        signal: "select",
+        signalMeta: {
+          options: [
+            { label: `Yes, use ${repoResolution.repoName}`, value: "yes" },
+            { label: "No, let me specify a different repo", value: "no" },
+          ],
+        },
+      });
+      api.logger.info?.(`${prefix}linear: awaiting repo confirmation for ${repoResolution.repoName}; not dispatching agent`);
+      if (session) inflightSessions.delete(session);
+      unregisterCurrentRun();
+      return;
+    }
   }
 
   // Resolve team ID for context
@@ -733,7 +804,14 @@ async function handleAgentEvent(
           if (subagentAvailable) {
             // ── Subagent path: lightweight context, avoids blocked_tool_call stall ──
             api.logger.info?.(`${prefix}linear [phase=exec]: dispatching via subagent, sessionKey=${execSessionKey}`);
-            const execMessage = buildExecPhaseMessage(planText, true);
+            const subagentApiBaseUrl = cfg.apiBaseUrl || (await import("../api/base-url.js")).getBaseUrl();
+            const execMessage = buildExecPhaseMessage(
+              planText,
+              true,
+              enableApi && apiToken
+                ? { apiToken, apiBaseUrl: subagentApiBaseUrl }
+                : undefined,
+            );
 
             try {
               const { runId } = await api.subagent!.run({
@@ -904,7 +982,7 @@ async function handleAgentEvent(
       }, { trace }).catch((e) => api.logger.warn?.(`${prefix}linear: failed to post error to Linear: ${formatError(e)}`));
       await postActivity(api, cfg, session, {
         type: "response",
-        body: `Agent stopped due to error: ${agentError}`,
+        body: "The agent could not be started (see the error above).",
       }, { trace }).catch((e) => api.logger.warn?.(`${prefix}linear: failed to post response to Linear: ${formatError(e)}`));
     } else if (agentText && agentText !== "Agent completed with no reply.") {
       api.logger.info?.(`${prefix}linear: posting agent response to Linear, session=${session ? session.slice(0, 8) + "..." : "(none)"}, textLen=${agentText.length}`);
@@ -937,17 +1015,20 @@ async function handleAgentEvent(
     }
     const msg = formatError(err);
     api.logger.warn?.(`${prefix}linear agent run failed: ${msg}`);
-    // Post both an error AND a response to ensure the session ends.
-    // activity/error alone does not end the Linear session — only activity/response does.
-    postActivity(api, cfg, session, {
+    // Post the error (carries the detail and renders as an error in Linear),
+    // then a short terminal response to end the session. activity/error alone
+    // does not end the session — only activity/response does. Await the error
+    // first so it is visible before the response closes the session, and keep
+    // the response concise rather than repeating the full message verbatim.
+    await postActivity(api, cfg, session, {
       type: "error",
       body: `Agent run failed: ${msg}`,
     }, { trace }).catch((postErr) => {
       api.logger.warn?.(`${prefix}linear: failed to post error to Linear: ${formatError(postErr)}`);
     });
-    postActivity(api, cfg, session, {
+    await postActivity(api, cfg, session, {
       type: "response",
-      body: `Agent run failed: ${msg}`,
+      body: "The agent run ended due to an error (see the error above).",
     }, { trace }).catch((postErr) => {
       api.logger.warn?.(`${prefix}linear: failed to post response to Linear: ${formatError(postErr)}`);
     });

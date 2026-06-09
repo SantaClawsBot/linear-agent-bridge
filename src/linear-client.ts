@@ -49,6 +49,35 @@ function requiresOAuth(label: string): boolean {
   return label.startsWith("agentActivityCreate") || label.startsWith("agentSession");
 }
 
+// Agent session lifeline operations (posting activities, updating the session
+// plan/state) must never be blocked by the breaker — they are how a session
+// communicates progress and, crucially, how it ENDS. Blocking a terminal
+// response/error because some unrelated issue accumulated failures would leave
+// a healthy session stuck "working". The OAuth-only set is exactly this set.
+function isBreakerExempt(label: string): boolean {
+  return requiresOAuth(label);
+}
+
+// Only transient/server-side GraphQL errors should trip the breaker. User-input
+// validation errors (bad ids, missing fields) are caller bugs, not a signal
+// that Linear is unhealthy, so counting them would open the breaker spuriously.
+function graphqlErrorsCountAsFailure(errors: unknown[]): boolean {
+  const TRANSIENT = new Set([
+    "RATELIMITED",
+    "INTERNAL_SERVER_ERROR",
+    "INTERNAL_ERROR",
+    "TIMEOUT",
+    "SERVICE_UNAVAILABLE",
+  ]);
+  for (const item of errors) {
+    const obj = readObject(item);
+    const ext = readObject(obj?.extensions);
+    const code = (readString(ext?.code) ?? readString(ext?.type) ?? "").toUpperCase();
+    if (code && TRANSIENT.has(code)) return true;
+  }
+  return false;
+}
+
 function isCircuitOpen(now = Date.now()): boolean {
   return circuitRef.openedUntil > now;
 }
@@ -96,7 +125,7 @@ export async function callLinear(
     return { ok: false };
   }
 
-  if (isCircuitOpen()) {
+  if (!isBreakerExempt(label) && isCircuitOpen()) {
     api.logger.warn?.(`linear ${label} skipped: circuit breaker open`);
     return { ok: false };
   }
@@ -157,6 +186,9 @@ export async function callLinear(
       .map((item) => readString(readObject(item)?.message) ?? "error")
       .filter(Boolean)
       .join("; ");
+    // Symmetric accounting: a GraphQL 200-with-errors is still a failure.
+    // Count it toward the breaker only when it looks transient/server-side.
+    if (graphqlErrorsCountAsFailure(errors as unknown[])) recordLinearFailure();
     api.logger.warn?.(`linear ${label} failed: ${detail}`);
     return { ok: false };
   }

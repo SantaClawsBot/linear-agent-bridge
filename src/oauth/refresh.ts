@@ -20,7 +20,15 @@ export async function getStoredAccessToken(pathFromCfg?: string): Promise<Linear
   return loadTokenSet(path);
 }
 
-export async function refreshStoredToken(
+// Single-flight: collapse concurrent refreshes for the same store path into
+// one network call. Linear rotates the refresh token on each refresh, so if
+// several agent runs hit a 401 at once and each POSTed independently, the first
+// success would invalidate the refresh token the others are using and all but
+// one would fail. Concurrent callers instead await the in-flight refresh and
+// receive the same freshly-rotated token set.
+const inflightRefresh = new Map<string, Promise<LinearTokenSet | undefined>>();
+
+export function refreshStoredToken(
   api: OpenClawPluginApi,
   opts: {
     tokenStorePath?: string;
@@ -28,8 +36,28 @@ export async function refreshStoredToken(
     clientSecret?: string;
   },
 ): Promise<LinearTokenSet | undefined> {
-  if (!opts.clientId || !opts.clientSecret) return undefined;
+  if (!opts.clientId || !opts.clientSecret) return Promise.resolve(undefined);
   const storePath = resolveTokenStorePath(opts.tokenStorePath);
+  const existing = inflightRefresh.get(storePath);
+  if (existing) return existing;
+  const pending = doRefreshStoredToken(api, opts, storePath).finally(() => {
+    inflightRefresh.delete(storePath);
+  });
+  inflightRefresh.set(storePath, pending);
+  return pending;
+}
+
+async function doRefreshStoredToken(
+  api: OpenClawPluginApi,
+  opts: {
+    tokenStorePath?: string;
+    clientId?: string;
+    clientSecret?: string;
+  },
+  storePath: string,
+): Promise<LinearTokenSet | undefined> {
+  const { clientId, clientSecret } = opts;
+  if (!clientId || !clientSecret) return undefined;
   const tokenSet = await loadTokenSet(storePath);
   const refreshToken = tokenSet?.refreshToken;
   if (!refreshToken) return undefined;
@@ -37,8 +65,8 @@ export async function refreshStoredToken(
   const params = new URLSearchParams({
     grant_type: "refresh_token",
     refresh_token: refreshToken,
-    client_id: opts.clientId,
-    client_secret: opts.clientSecret,
+    client_id: clientId,
+    client_secret: clientSecret,
   });
 
   const res = await fetch("https://api.linear.app/oauth/token", {

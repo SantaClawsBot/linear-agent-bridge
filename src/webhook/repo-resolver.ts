@@ -4,7 +4,8 @@
 
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdirSync, existsSync } from "node:fs";
+import { mkdirSync, existsSync, rmSync, renameSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import type { OpenClawPluginApi, PluginConfig } from "../types.js";
 import { callLinear } from "../linear-client.js";
@@ -147,15 +148,73 @@ async function suggestRepo(
 }
 
 /**
- * Ensure a repo is cloned locally. Returns the directory path.
+ * Compute the local checkout directory for a repo (does not clone).
  */
-function ensureCloned(repo: OrgRepo, baseDir: string): string {
+function repoDir(repo: OrgRepo, baseDir: string): string {
   if (repo.dir && existsSync(repo.dir)) {
     return repo.dir;
   }
   const parts = repo.fullName.split("/");
-  const dir = join(baseDir, parts[0], parts[1]);
-  return dir;
+  return join(baseDir, parts[0], parts[1]);
+}
+
+// Single-flight clones per target directory. Two concurrent issues that
+// resolve to the same un-cloned repo must not both `git clone` into the same
+// path — the second would fail (non-empty dir) or corrupt a partial checkout.
+// Concurrent callers await the same in-flight clone.
+const inflightClones = new Map<string, Promise<void>>();
+
+/**
+ * Ensure a repo is cloned at `dir`. Clones into a temp dir and atomically
+ * renames into place so a crashed/partial clone never leaves a half-checkout
+ * that blocks future clones. Returns true if `dir` ends up a valid checkout.
+ */
+async function ensureRepoCloned(
+  api: OpenClawPluginApi,
+  repo: OrgRepo,
+  dir: string,
+): Promise<boolean> {
+  if (existsSync(join(dir, ".git"))) return true;
+  let pending = inflightClones.get(dir);
+  if (!pending) {
+    pending = cloneToDir(api, repo, dir).finally(() => inflightClones.delete(dir));
+    inflightClones.set(dir, pending);
+  }
+  try {
+    await pending;
+  } catch {
+    return false;
+  }
+  return existsSync(join(dir, ".git"));
+}
+
+async function cloneToDir(
+  api: OpenClawPluginApi,
+  repo: OrgRepo,
+  dir: string,
+): Promise<void> {
+  const parent = join(dir, "..");
+  mkdirSync(parent, { recursive: true });
+  const tmp = join(parent, `.clone-${randomBytes(6).toString("hex")}`);
+  const ef = promisify(execFileCb);
+  try {
+    await ef("git", ["clone", "--depth", "1", repo.cloneUrl, tmp], {
+      timeout: 120_000,
+    });
+    // Another run may have won the race while we cloned — keep theirs.
+    if (existsSync(join(dir, ".git"))) {
+      rmSync(tmp, { recursive: true, force: true });
+      return;
+    }
+    renameSync(tmp, dir);
+    api.logger.info?.(`linear: cloned ${repo.fullName} to ${dir}`);
+  } catch (err) {
+    rmSync(tmp, { recursive: true, force: true });
+    api.logger.warn?.(
+      `linear: failed to clone ${repo.fullName}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    throw err;
+  }
 }
 
 /**
@@ -238,25 +297,12 @@ export async function resolveRepoWithOrg(
   );
 
   const baseDir = reposCacheDir();
-  const dir = ensureCloned(match.repo, baseDir);
+  const dir = repoDir(match.repo, baseDir);
 
-  // Auto-clone if the directory doesn't exist yet
-  if (!existsSync(dir)) {
-    try {
-      mkdirSync(join(dir, ".."), { recursive: true });
-      const { execFile: ef } = await import("node:child_process");
-      const { promisify: p } = await import("node:util");
-      const pe = p(ef);
-      await pe("git", ["clone", "--depth", "1", match.repo.cloneUrl, dir], {
-        timeout: 120_000,
-      });
-      api.logger.info?.(`linear: cloned ${match.repo.fullName} to ${dir}`);
-    } catch (err) {
-      api.logger.warn?.(
-        `linear: failed to clone ${match.repo.fullName}: ${err instanceof Error ? err.message : String(err)}`,
-      );
-      return { dir: staticRepo, suggested: false };
-    }
+  // Auto-clone if the checkout doesn't exist yet (single-flight + atomic).
+  const cloned = await ensureRepoCloned(api, match.repo, dir);
+  if (!cloned) {
+    return { dir: staticRepo, suggested: false };
   }
 
   return { dir, suggested: true, repoName: match.repo.fullName, confidence, needsConfirmation: confidence < HIGH_CONFIDENCE };

@@ -90,38 +90,6 @@ export const COMMENT_SESSION_QUERY = `
   }
 `;
 
-export const COMMENT_THREAD_NODE_QUERY = `
-  query CommentThreadNode($id: String!) {
-    comment(id: $id) {
-      id
-      body
-      parentId
-      parent {
-        id
-        body
-        parentId
-      }
-    }
-  }
-`;
-
-export const ISSUE_SESSION_QUERY = `
-  query IssueSession($id: String!) {
-    issue(id: $id) {
-      comments(first: 25) {
-        nodes {
-          id
-          parentId
-          agentSession { id appUser { id } }
-          agentSessions(first: 3) {
-            nodes { id appUser { id } }
-          }
-        }
-      }
-    }
-  }
-`;
-
 export const REPO_SUGGESTIONS_QUERY = `
   query RepoSuggestions(
     $issueId: String!,
@@ -137,21 +105,6 @@ export const REPO_SUGGESTIONS_QUERY = `
         repositoryFullName
         hostname
         confidence
-      }
-    }
-  }
-`;
-
-export const ISSUE_BY_IDENTIFIER_QUERY = `
-  query IssueByIdentifier($identifier: String!) {
-    issues(filter: { identifier: { eq: $identifier } }) {
-      nodes {
-        id
-        identifier
-        title
-        description
-        url
-        team { id }
       }
     }
   }

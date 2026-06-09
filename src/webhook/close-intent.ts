@@ -1,21 +1,40 @@
 import type { OpenClawPluginApi, PluginConfig } from "../types.js";
 import { resolveIssueInfo, resolveCompletedState, updateIssue } from "./issue-policy.js";
 
+// Detects a message that is *essentially just* an imperative "close this
+// issue" command. This is deliberately narrow: a match bypasses the agent
+// entirely and moves the issue to a completed state, so an over-broad match
+// would auto-close issues on incidental mentions ("before you close this,
+// make sure the tests pass"). Callers should additionally gate this to
+// follow-up (prompted) events only.
 export function isCloseIntentPrompt(prompt: string): boolean {
   const text = (prompt ?? "").trim().toLowerCase();
   if (!text) return false;
+  // Negative guard: never treat "don't close" as a close command.
   if (
-    /(не\s+закры(вай|ть|вайте|й)?)/.test(text) ||
-    /(don't\s+close|do\s+not\s+close)/.test(text)
+    /не\s+закры(вай|ть|вайте|й)?/.test(text) ||
+    /don'?t\s+close|do\s+not\s+close/.test(text)
   )
     return false;
-  if (/(закрой|закрыть|закройте|закрывай)/.test(text)) return true;
+
+  // Require a short, imperative message — not a sentence that merely contains
+  // the word "close" somewhere in the middle.
+  const wordCount = text.split(/\s+/).filter(Boolean).length;
+  if (wordCount > 6) return false;
+
+  // Russian imperative close at the start of the message. (Note: JS \b is
+  // ASCII-only, so use an explicit whitespace/end anchor for Cyrillic.)
+  if (/^(закрой|закрыть|закройте|закрывай)(\s|$)/.test(text)) return true;
+  // English: must START with "close" (optionally "please close") and refer to
+  // the issue/task explicitly.
   if (
-    /\bclose\b/.test(text) &&
-    /\b(task|issue|ticket|таск|задач[ауые]?)\b/.test(text)
+    /^(please\s+)?close\b/.test(text) &&
+    /\b(it|this|that|task|issue|ticket|таск|задач[ауые]?)\b/.test(text)
   )
     return true;
-  if (/\bmark\b.*\bdone\b/.test(text)) return true;
+  // "mark it done / complete / closed" as a short imperative.
+  if (/^(please\s+)?mark\b.*\b(done|complete|completed|closed)\b/.test(text))
+    return true;
   return false;
 }
 
