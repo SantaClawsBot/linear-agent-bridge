@@ -26,6 +26,7 @@ export function normalizeCfg(
     apiBaseUrl: readCfgString(cfg, "apiBaseUrl"),
     apiCorsOrigins: readCfgStringArray(cfg, "apiCorsOrigins"),
     apiCorsAllowCredentials: readCfgBool(cfg, "apiCorsAllowCredentials"),
+    requireSessionAppUser: readCfgBool(cfg, "requireSessionAppUser"),
     closeOnComplete: readCfgBool(cfg, "closeOnComplete"),
     maxConcurrent: readCfgNumber(cfg, "maxConcurrent"),
     githubOrg: readCfgString(cfg, "githubOrg"),

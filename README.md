@@ -200,6 +200,7 @@ Authentication requires **one** of these modes:
 | `linearTokenStorePath` | `string` | `~/.openclaw/workspace/.pi/linear-oauth.json` | Workspace-local OAuth token store path (written with `0600`) |
 | `apiCorsOrigins` | `string[]` | — | Allowed origins for CORS on `/plugins/linear/api`. Use `["*"]` to allow any origin |
 | `apiCorsAllowCredentials` | `boolean` | `false` | Adds `Access-Control-Allow-Credentials: true` when origin is explicitly allowed |
+| `requireSessionAppUser` | `boolean` | `true` | Ignore an AgentSessionEvent whose payload omits the session's appUser (fail closed — never dispatch for a session we can't confirm we own). Set `false` to allow such events through (older webhook versions) |
 
 ### Addressing Controls
 

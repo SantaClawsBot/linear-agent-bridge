@@ -109,6 +109,10 @@
         "type": "boolean",
         "description": "Set Access-Control-Allow-Credentials on /plugins/linear/api responses"
       },
+      "requireSessionAppUser": {
+        "type": "boolean",
+        "description": "Require the AgentSessionEvent payload to include the session's appUser before dispatching. When true (default), events whose payload omits appUser are ignored (fail closed) so we never run for a session we can't confirm we own. Set false to allow them through (older webhook versions)."
+      },
 
 
       "closeOnComplete": {
@@ -196,6 +200,10 @@
     },
     "apiCorsAllowCredentials": {
       "label": "API CORS allow credentials"
+    },
+    "requireSessionAppUser": {
+      "label": "Require session app user",
+      "description": "Ignore AgentSessionEvents whose payload omits the appUser (fail closed). Disable only if Linear omits appUser for your app."
     },
     "closeOnComplete": {
       "label": "Move issue to review on agent completion",

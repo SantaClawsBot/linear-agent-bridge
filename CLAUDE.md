@@ -96,7 +96,7 @@ Base URL is auto-detected from the `Host` header of incoming webhooks (Tailscale
 - **callLinear()** in `linear-client.ts` — single gateway for all Linear GraphQL calls (auth, error handling, logging)
 - **Session token scoping** — each agent run gets a unique bearer token tied to its session context; revoked on completion
 - **Response deduplication** — if agent posts a response via API, the handler skips auto-posting the text response
-- **Session ID resolution** — read directly from the AgentSessionEvent payload (`created` and `prompted` both embed it); ownership confirmed from the payload's appUser. The plugin subscribes only to "Agent session events" (+ optionally "Issues" for cancel-on-unassign), not Comments, so no GraphQL comment→session fallback is needed
+- **Session ID resolution** — read directly from the AgentSessionEvent payload (`created` and `prompted` both embed it); ownership confirmed from the payload's appUser. When the payload omits appUser, the event is ignored by default (`requireSessionAppUser`, fail closed). The plugin subscribes only to "Agent session events" (+ optionally "Issues" for cancel-on-unassign), not Comments, so no GraphQL comment→session fallback is needed
 - **Per-session serialization** — `runSerialized` ensures one run per Linear session at a time (queues genuine follow-ups, drops same-action/Comment-on-creation duplicates within a 5s window)
 - **API endpoint registration** — `registerApiHandler()` in router.ts; ops files register via side-effect imports
 

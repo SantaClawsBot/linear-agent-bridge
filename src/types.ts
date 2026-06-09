@@ -87,6 +87,8 @@ export interface PluginConfig {
   apiBaseUrl?: string;
   apiCorsOrigins?: string[];
   apiCorsAllowCredentials?: boolean;
+  /** Require the AgentSessionEvent payload to carry the session's appUser. When true (default) and the payload omits appUser info, the event is ignored rather than dispatched — fail closed. Set false to allow such events through (older webhook versions). */
+  requireSessionAppUser?: boolean;
   /** When the agent finishes successfully on a "created" action, move the issue to the team's "review" workflow state for human sign-off (default: true) */
   closeOnComplete?: boolean;
   /** Maximum concurrent agent runs (default: 3) */

@@ -1,6 +1,6 @@
 import type { OpenClawPluginApi, PluginConfig } from "../types.js";
 import { resolveViewer } from "../linear-client.js";
-import { readObject, readString } from "../util.js";
+import { readObject, readString, resolveFlag } from "../util.js";
 
 // Cached viewer (our app user) ID — resolved once, reused everywhere.
 const viewerRef: { value?: string } = {};
@@ -95,9 +95,12 @@ async function getViewerId(
  * Resolve the agent session id for an event and confirm we own it.
  *
  * The session id is read straight from the AgentSessionEvent payload (no API
- * call). Ownership is checked from the payload's appUser when present, so we
- * ignore sessions belonging to other apps. If the payload omits appUser info we
- * allow it through (older webhook versions).
+ * call). Ownership is checked from the payload's appUser:
+ *  - present and not ours  -> ignore (another app's session);
+ *  - present and ours       -> accept;
+ *  - missing                -> ignore when `requireSessionAppUser` is true
+ *                              (default, fail closed), else accept (lenient,
+ *                              for older webhook versions).
  */
 export async function resolveOwnedSessionId(
   api: OpenClawPluginApi,
@@ -115,6 +118,15 @@ export async function resolveOwnedSessionId(
       );
       return "";
     }
+    return direct;
+  }
+  // No appUser in the payload. Fail closed by default so we never dispatch for
+  // a session we can't confirm we own; opt out with requireSessionAppUser:false.
+  if (resolveFlag(cfg.requireSessionAppUser, true)) {
+    api.logger.warn?.(
+      `linear: ignoring session ${direct.slice(0, 8)}... — payload has no appUser to confirm ownership (set requireSessionAppUser:false to allow these through)`,
+    );
+    return "";
   }
   return direct;
 }

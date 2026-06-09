@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  resolveOwnedSessionId,
   resolveSessionAppUserFromPayload,
   resolveSessionId,
 } from "../dist/src/webhook/session-resolver.js";
+
+const api = { logger: { info() {}, warn() {} } };
 
 test("resolveSessionId reads the session id directly from AgentSessionEvent payloads", () => {
   // created: nested agentSession object
@@ -39,4 +42,25 @@ test("resolveSessionAppUserFromPayload reads nested agentSession.appUser.id", ()
     }),
     "app-2",
   );
+});
+
+test("resolveOwnedSessionId fails closed when the payload has a session but no appUser (default)", async () => {
+  const id = await resolveOwnedSessionId(api, {}, {
+    type: "AgentSessionEvent",
+    agentSession: { id: "s1" },
+  });
+  assert.equal(id, "");
+});
+
+test("resolveOwnedSessionId allows a session with no appUser when requireSessionAppUser is false", async () => {
+  const id = await resolveOwnedSessionId(api, { requireSessionAppUser: false }, {
+    type: "AgentSessionEvent",
+    agentSession: { id: "s1" },
+  });
+  assert.equal(id, "s1");
+});
+
+test("resolveOwnedSessionId returns '' when there is no session at all", async () => {
+  const id = await resolveOwnedSessionId(api, {}, { type: "Issue", id: "i1" });
+  assert.equal(id, "");
 });
