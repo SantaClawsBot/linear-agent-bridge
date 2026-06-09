@@ -119,6 +119,7 @@ export interface ActivityOptions {
   signal?: string;
   signalMeta?: Record<string, unknown>;
   ephemeral?: boolean;
+  trace?: string;
 }
 
 export interface PlanStep {

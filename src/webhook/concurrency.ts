@@ -4,6 +4,7 @@
 // event loop guarantee — no mutex needed between check & increment.
 
 import type { OpenClawPluginApi, PluginConfig } from "../types.js";
+import { resolveTraceId, tracePrefix } from "./trace.js";
 
 const DEFAULT_MAX_CONCURRENT = 3;
 let activeCount = 0;
@@ -45,8 +46,9 @@ export function enqueueAgentRun(
     activeCount++;
     runAndDrain(api, cfg, data, delivery, run);
   } else {
+    const trace = resolveTraceId(data, delivery, "");
     api.logger.info?.(
-      `linear: concurrency limit reached (${activeCount}/${limit}), queuing (depth=${queue.length})`,
+      `${tracePrefix(trace)}linear: concurrency limit reached (${activeCount}/${limit}), queuing (depth=${queue.length})`,
     );
     queue.push({ api, cfg, data, delivery, run });
   }

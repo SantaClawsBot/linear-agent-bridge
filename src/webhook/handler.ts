@@ -51,6 +51,7 @@ import { buildEnrichedMessage } from "../agent/context-builder.js";
 import { cleanupSession } from "../agent/plan-manager.js";
 import { hasPostedResponse, clearResponseFlag } from "../agent/response-tracker.js";
 import { captureBaseUrl } from "../api/base-url.js";
+import { resolveTraceId, tracePrefix } from "./trace.js";
 
 const callRef: { value?: (opts: Record<string, unknown>) => Promise<unknown> } = {};
 
@@ -182,6 +183,26 @@ setInterval(() => {
   }
 }, 5 * 60 * 1000).unref?.();
 
+function formatError(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function postActivityFireAndForget(
+  api: OpenClawPluginApi,
+  cfg: PluginConfig,
+  trace: string,
+  session: string,
+  content: ActivityContent,
+  opts: ActivityOptions = {},
+): void {
+  const prefix = tracePrefix(trace);
+  postActivity(api, cfg, session, content, { ...opts, trace }).catch((err) => {
+    api.logger.warn?.(
+      `${prefix}linear: failed to post ${content.type} activity: ${formatError(err)}`,
+    );
+  });
+}
+
 export function createLinearWebhook(
   api: OpenClawPluginApi,
 ): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
@@ -281,10 +302,12 @@ async function handleWebhook(
   const eventData = resolveSessionId(data)
     ? data
     : { ...data, agentSessionId: sessionId };
-  rememberSessionHint(eventData, sessionId);
+  const trace = resolveTraceId(eventData, delivery, sessionId);
+  const tracedEventData = { ...eventData, linearTraceId: trace };
+  rememberSessionHint(tracedEventData, sessionId);
   // Dispatch through concurrency limiter instead of calling handleAgentEvent directly.
   const { enqueueAgentRun } = await import("./concurrency.js");
-  enqueueAgentRun(api, cfg, eventData, delivery, handleAgentEvent);
+  enqueueAgentRun(api, cfg, tracedEventData, delivery, handleAgentEvent);
 }
 
 async function handleAgentEvent(
@@ -325,6 +348,8 @@ async function handleAgentEvent(
   const agent = cfg.devAgentId ?? "dev";
   const label = buildLabel(id, title);
   const session = resolveSessionId(data);
+  const trace = resolveTraceId(data, delivery, session);
+  const prefix = tracePrefix(trace);
 
   // Dedup: skip if an agent is already running for this session.
   // "prompted" (follow-up comment) actions are allowed through UNLESS
@@ -333,7 +358,7 @@ async function handleAgentEvent(
   if (session && inflightSessions.has(session)) {
     const elapsed = Date.now() - inflightSessions.get(session)!;
     if (action !== "prompted" || elapsed < DEDUP_WINDOW_MS) {
-      api.logger.info?.(`linear handler: skipping duplicate for session ${session.slice(0, 8)}... (action=${action}, elapsed=${elapsed}ms)`);
+      api.logger.info?.(`${prefix}linear handler: skipping duplicate for session ${session.slice(0, 8)}... (action=${action}, elapsed=${elapsed}ms)`);
       return;
     }
   }
@@ -356,10 +381,10 @@ async function handleAgentEvent(
       repo = resolved.dir;
       repoResolution = resolved;
       if (resolved.suggested && resolved.repoName) {
-        api.logger.info?.(`linear: auto-resolved repo ${resolved.repoName} → ${repo}`);
+        api.logger.info?.(`${prefix}linear: auto-resolved repo ${resolved.repoName} → ${repo}`);
       }
     } catch (err) {
-      api.logger.warn?.(`linear: repo resolution failed: ${err instanceof Error ? err.message : String(err)}`);
+      api.logger.warn?.(`${prefix}linear: repo resolution failed: ${formatError(err)}`);
     }
   }
 
@@ -367,22 +392,22 @@ async function handleAgentEvent(
   if (signal === "stop") {
     if (session) inflightSessions.delete(session);
     const text = buildStopText(id, title);
-    postActivity(api, cfg, session, { type: "response", body: text }).catch(() => {});
+    postActivityFireAndForget(api, cfg, trace, session, { type: "response", body: text });
     return;
   }
 
   // Post initial "thinking" activity
   const thought = buildThought(action, id, title);
-  postActivity(api, cfg, session, { type: "thought", body: thought }, { ephemeral: true }).catch(() => {});
+  postActivityFireAndForget(api, cfg, trace, session, { type: "thought", body: thought }, { ephemeral: true });
 
   // Post repo resolution status and ask for confirmation if confidence is low
   if (repoResolution?.repoName && session) {
     const pct = Math.round((repoResolution.confidence ?? 0) * 100);
     const repoThought = `Resolved repo: ${repoResolution.repoName} (${pct}% confidence)`;
-    postActivity(api, cfg, session, { type: "thought", body: repoThought }).catch(() => {});
+    postActivityFireAndForget(api, cfg, trace, session, { type: "thought", body: repoThought });
 
     if (repoResolution.needsConfirmation) {
-      postActivity(api, cfg, session, {
+      postActivityFireAndForget(api, cfg, trace, session, {
         type: "elicitation",
         body: `I'm planning to work in ${repoResolution.repoName} (${pct}% confidence). Is this the right repository?`,
       }, {
@@ -393,7 +418,7 @@ async function handleAgentEvent(
             { value: "No, let me specify a different repo" },
           ],
         },
-      }).catch(() => {});
+      });
     }
   }
 
@@ -403,7 +428,7 @@ async function handleAgentEvent(
     const closeText = issueId
       ? await closeIssueFromPrompt(api, cfg, issueId, id, title)
       : "Не удалось определить задачу для закрытия.";
-    postActivity(api, cfg, session, { type: "response", body: closeText }).catch(() => {});
+    postActivityFireAndForget(api, cfg, trace, session, { type: "response", body: closeText });
     return;
   }
 
@@ -411,9 +436,13 @@ async function handleAgentEvent(
   if (action === "created") {
     const external = resolveExternal(cfg, session, issueId);
     if (external) {
-      updateSessionExternalUrl(api, cfg, session, external.url, external.label).catch(() => {});
+      updateSessionExternalUrl(api, cfg, session, external.url, external.label).catch((err) => {
+        api.logger.warn?.(`${prefix}linear: failed to update external URL: ${formatError(err)}`);
+      });
     }
-    applyIssuePolicy(api, cfg, issueId).catch(() => {});
+    applyIssuePolicy(api, cfg, issueId).catch((err) => {
+      api.logger.warn?.(`${prefix}linear: failed to apply issue policy: ${formatError(err)}`);
+    });
   }
 
   // Resolve team ID for context
@@ -422,7 +451,7 @@ async function handleAgentEvent(
 
   // Generate per-session API token for agent to call back
   const enableApi = cfg.enableAgentApi !== false;
-  api.logger.info?.(`linear handler: enableApi=${enableApi} session=${session ? session.slice(0, 8) + "..." : "(none)"} issueId=${issueId.slice(0, 8) || "(none)"}`);
+  api.logger.info?.(`${prefix}linear handler: enableApi=${enableApi} session=${session ? session.slice(0, 8) + "..." : "(none)"} issueId=${issueId.slice(0, 8) || "(none)"}`);
   let apiToken = "";
   if (enableApi && session) {
     const sessionCtx = {
@@ -444,7 +473,7 @@ async function handleAgentEvent(
   if (enableApi && apiToken) {
     const { getBaseUrl } = await import("../api/base-url.js");
     const apiBaseUrl = cfg.apiBaseUrl || getBaseUrl();
-    api.logger.info?.(`linear handler: ENRICHED message, apiBaseUrl=${apiBaseUrl}, tokenLen=${apiToken.length}`);
+    api.logger.info?.(`${prefix}linear handler: ENRICHED message, apiBaseUrl=${apiBaseUrl}, tokenLen=${apiToken.length}`);
     message = buildEnrichedMessage({
       action,
       id,
@@ -464,7 +493,7 @@ async function handleAgentEvent(
       repoDir: repo,
     });
   } else {
-    api.logger.info?.(`linear handler: PLAIN message (no enrichment), enableApi=${enableApi}, apiToken=${apiToken ? "set" : "empty"}`);
+    api.logger.info?.(`${prefix}linear handler: PLAIN message (no enrichment), enableApi=${enableApi}, apiToken=${apiToken ? "set" : "empty"}`);
     message = buildMessage({
       action,
       id,
@@ -509,10 +538,10 @@ async function handleAgentEvent(
       const KEEPALIVE_INTERVAL_MS = 8_000;
       keepaliveTimer = setInterval(() => {
         if (!keepaliveAlive) return;
-        postActivity(api, cfg, session, {
+        postActivityFireAndForget(api, cfg, trace, session, {
           type: "thought",
           body: "Working…",
-        }, { ephemeral: true }).catch(() => {});
+        }, { ephemeral: true });
       }, KEEPALIVE_INTERVAL_MS);
       if (keepaliveTimer.unref) keepaliveTimer.unref();
     }
@@ -525,11 +554,11 @@ async function handleAgentEvent(
 
         // Phase 1: PLAN — investigate and produce a plan
         const planSessionKey = `${sessionKey}:plan`;
-        api.logger.info?.(`linear [phase=plan]: dispatching, sessionKey=${planSessionKey}`);
-        postActivity(api, cfg, session, {
+        api.logger.info?.(`${prefix}linear [phase=plan]: dispatching, sessionKey=${planSessionKey}`);
+        postActivityFireAndForget(api, cfg, trace, session, {
           type: "thought",
           body: "Investigating issue and planning implementation…",
-        }, { ephemeral: true }).catch(() => {});
+        }, { ephemeral: true });
 
         const planResult = await call({
           method: "agent",
@@ -543,7 +572,7 @@ async function handleAgentEvent(
           timeoutMs: PHASE_TIMEOUT_MS,
         });
         const planText = buildAgentResponse(planResult);
-        api.logger.info?.(`linear [phase=plan]: completed, textLen=${planText?.length ?? 0}`);
+        api.logger.info?.(`${prefix}linear [phase=plan]: completed, textLen=${planText?.length ?? 0}`);
         // Intermediate phases may have posted activity/response despite instructions
         // not to — clear the flag so the final response from the handler is posted.
         if (session) clearResponseFlag(session);
@@ -560,17 +589,17 @@ async function handleAgentEvent(
           // giving the agent a smaller initial context that doesn't stall.
           //
           const execSessionKey = `${sessionKey}:exec`;
-          postActivity(api, cfg, session, {
+          postActivityFireAndForget(api, cfg, trace, session, {
             type: "thought",
             body: "Implementing the plan…",
-          }, { ephemeral: true }).catch(() => {});
+          }, { ephemeral: true });
 
           // Diagnostic: log subagent availability
           const subagentAvailable = api.subagent && typeof api.subagent.run === "function";
-          api.logger.info?.(`linear [phase=exec]: subagent available=${subagentAvailable}, type=${typeof api.subagent}`);
+          api.logger.info?.(`${prefix}linear [phase=exec]: subagent available=${subagentAvailable}, type=${typeof api.subagent}`);
           if (subagentAvailable) {
             // ── Subagent path: lightweight context, avoids blocked_tool_call stall ──
-            api.logger.info?.(`linear [phase=exec]: dispatching via subagent, sessionKey=${execSessionKey}`);
+            api.logger.info?.(`${prefix}linear [phase=exec]: dispatching via subagent, sessionKey=${execSessionKey}`);
             const execMessage = buildExecPhaseMessage(planText, true);
 
             try {
@@ -582,7 +611,7 @@ async function handleAgentEvent(
                 lane: "subagent",
                 lightContext: true,
               });
-              api.logger.info?.(`linear [phase=exec]: subagent dispatched, runId=${runId}`);
+              api.logger.info?.(`${prefix}linear [phase=exec]: subagent dispatched, runId=${runId}`);
 
               const waitResult = await api.subagent!.waitForRun({
                 runId,
@@ -604,18 +633,18 @@ async function handleAgentEvent(
                       ? (lastAssistant.content as Array<Record<string, unknown>>).filter((p) => p.type === "text").map((p) => p.text ?? "").join("")
                       : String(lastAssistant.content))
                     : undefined;
-                api.logger.info?.(`linear [phase=exec]: subagent completed, textLen=${agentText?.length ?? 0}`);
+                api.logger.info?.(`${prefix}linear [phase=exec]: subagent completed, textLen=${agentText?.length ?? 0}`);
               } else if (waitResult.status === "timeout") {
                 agentError = "Execution phase timed out";
-                api.logger.warn?.(`linear [phase=exec]: subagent timed out, runId=${runId}`);
+                api.logger.warn?.(`${prefix}linear [phase=exec]: subagent timed out, runId=${runId}`);
               } else {
                 agentError = waitResult.error || "Execution phase failed";
-                api.logger.warn?.(`linear [phase=exec]: subagent error: ${agentError}, runId=${runId}`);
+                api.logger.warn?.(`${prefix}linear [phase=exec]: subagent error: ${agentError}, runId=${runId}`);
               }
             } catch (subagentErr) {
               // Subagent unavailable or failed — fall back to callGateway
-              const errMsg = subagentErr instanceof Error ? subagentErr.message : String(subagentErr);
-              api.logger.warn?.(`linear [phase=exec]: subagent failed (${errMsg}), falling back to callGateway`);
+              const errMsg = formatError(subagentErr);
+              api.logger.warn?.(`${prefix}linear [phase=exec]: subagent failed (${errMsg}), falling back to callGateway`);
               const execApiBaseUrl = cfg.apiBaseUrl || (await import("../api/base-url.js")).getBaseUrl();
               const fallbackMessage = enableApi && apiToken
                 ? buildEnrichedMessage({
@@ -639,11 +668,11 @@ async function handleAgentEvent(
                 timeoutMs: AGENT_TIMEOUT_MS,
               });
               agentText = buildAgentResponse(execResult);
-              api.logger.info?.(`linear [phase=exec]: callGateway fallback completed, textLen=${agentText?.length ?? 0}`);
+              api.logger.info?.(`${prefix}linear [phase=exec]: callGateway fallback completed, textLen=${agentText?.length ?? 0}`);
             }
           } else {
             // ── Legacy path: callGateway with full context (may stall) ──
-            api.logger.info?.(`linear [phase=exec]: subagent unavailable, using callGateway`);
+            api.logger.info?.(`${prefix}linear [phase=exec]: subagent unavailable, using callGateway`);
             const execApiBaseUrl = cfg.apiBaseUrl || (await import("../api/base-url.js")).getBaseUrl();
             const legacyMessage = enableApi && apiToken
               ? buildEnrichedMessage({
@@ -667,7 +696,7 @@ async function handleAgentEvent(
               timeoutMs: AGENT_TIMEOUT_MS,
             });
             agentText = buildAgentResponse(execResult);
-            api.logger.info?.(`linear [phase=exec]: callGateway completed, textLen=${agentText?.length ?? 0}`);
+            api.logger.info?.(`${prefix}linear [phase=exec]: callGateway completed, textLen=${agentText?.length ?? 0}`);
           }
           // Clear response flag — the exec agent may have posted activity/response,
           // but the handler should still post the final response after all phases complete.
@@ -675,7 +704,7 @@ async function handleAgentEvent(
         }
       } else {
         // ── Single-phase dispatch (for prompted/follow-ups) ──
-        api.logger.info?.(`linear: dispatching via callGateway, sessionKey=${sessionKey}`);
+        api.logger.info?.(`${prefix}linear: dispatching via callGateway, sessionKey=${sessionKey}`);
         const agentResult = await call({
           method: "agent",
           params: {
@@ -688,11 +717,11 @@ async function handleAgentEvent(
           timeoutMs: AGENT_TIMEOUT_MS,
         });
         agentText = buildAgentResponse(agentResult);
-        api.logger.info?.(`linear: callGateway completed, sessionKey=${sessionKey}, textLen=${agentText?.length ?? 0}`);
+        api.logger.info?.(`${prefix}linear: callGateway completed, sessionKey=${sessionKey}, textLen=${agentText?.length ?? 0}`);
       }
     } catch (dispatchErr) {
-      const dispatchMsg = dispatchErr instanceof Error ? dispatchErr.message : String(dispatchErr);
-      api.logger.warn?.(`linear: callGateway dispatch failed (${dispatchMsg})`);
+      const dispatchMsg = formatError(dispatchErr);
+      api.logger.warn?.(`${prefix}linear: callGateway dispatch failed (${dispatchMsg})`);
       agentError = dispatchMsg;
     } finally {
       keepaliveAlive = false;
@@ -705,14 +734,14 @@ async function handleAgentEvent(
     if (session) cleanupSession(session);
 
     const hasAgentResponse = session && hasPostedResponse(session);
-    api.logger.info?.(`linear: agent run done, session=${session ? session.slice(0, 8) + "..." : "(none)"}, hasResponse=${Boolean(hasAgentResponse)}, error=${Boolean(agentError)}, textLen=${agentText?.length ?? 0}`);
+    api.logger.info?.(`${prefix}linear: agent run done, session=${session ? session.slice(0, 8) + "..." : "(none)"}, hasResponse=${Boolean(hasAgentResponse)}, error=${Boolean(agentError)}, textLen=${agentText?.length ?? 0}`);
 
     // If the agent explicitly posted a response via the API, skip auto-post.
     if (hasAgentResponse) {
       clearResponseFlag(session);
       // Auto-close issue if agent ran on a "created" action and completed without error
       if (action === "created" && issueId && !agentError && resolveFlag(cfg.closeOnComplete, true)) {
-        autoCloseIssue(api, cfg, issueId).catch((e) => api.logger.warn?.(`linear: autoCloseIssue failed: ${e instanceof Error ? e.message : String(e)}`));
+        autoCloseIssue(api, cfg, issueId).catch((e) => api.logger.warn?.(`${prefix}linear: autoCloseIssue failed: ${formatError(e)}`));
       }
       return;
     }
@@ -721,53 +750,53 @@ async function handleAgentEvent(
     // ALWAYS post activity/response — it's the only way to end the Linear session.
     if (agentError) {
       // Dispatch itself failed — post error AND response (error alone doesn't end session)
-      api.logger.info?.(`linear: posting dispatch error to Linear, session=${session ? session.slice(0, 8) + "..." : "(none)"}`);
+      api.logger.info?.(`${prefix}linear: posting dispatch error to Linear, session=${session ? session.slice(0, 8) + "..." : "(none)"}`);
       await postActivity(api, cfg, session, {
         type: "error",
         body: `Agent dispatch failed: ${agentError}`,
-      }).catch((e) => api.logger.warn?.(`linear: failed to post error to Linear: ${e instanceof Error ? e.message : String(e)}`));
+      }, { trace }).catch((e) => api.logger.warn?.(`${prefix}linear: failed to post error to Linear: ${formatError(e)}`));
       await postActivity(api, cfg, session, {
         type: "response",
         body: `Agent stopped due to error: ${agentError}`,
-      }).catch((e) => api.logger.warn?.(`linear: failed to post response to Linear: ${e instanceof Error ? e.message : String(e)}`));
+      }, { trace }).catch((e) => api.logger.warn?.(`${prefix}linear: failed to post response to Linear: ${formatError(e)}`));
     } else if (agentText && agentText !== "Agent completed with no reply.") {
-      api.logger.info?.(`linear: posting agent response to Linear, session=${session ? session.slice(0, 8) + "..." : "(none)"}, textLen=${agentText.length}`);
-      await postActivity(api, cfg, session, { type: "response", body: agentText }).catch((e) => api.logger.warn?.(`linear: failed to post response to Linear: ${e instanceof Error ? e.message : String(e)}`));
+      api.logger.info?.(`${prefix}linear: posting agent response to Linear, session=${session ? session.slice(0, 8) + "..." : "(none)"}, textLen=${agentText.length}`);
+      await postActivity(api, cfg, session, { type: "response", body: agentText }, { trace }).catch((e) => api.logger.warn?.(`${prefix}linear: failed to post response to Linear: ${formatError(e)}`));
     } else {
       // Agent completed with no text — post a minimal response so the user sees completion
-      api.logger.info?.(`linear: agent returned empty response, posting minimal response, session=${session ? session.slice(0, 8) + "..." : "(none)"}`);
+      api.logger.info?.(`${prefix}linear: agent returned empty response, posting minimal response, session=${session ? session.slice(0, 8) + "..." : "(none)"}`);
       await postActivity(api, cfg, session, {
         type: "response",
         body: "Done — no further output from the agent.",
-      }).catch((e) => api.logger.warn?.(`linear: failed to post minimal response: ${e instanceof Error ? e.message : String(e)}`));
+      }, { trace }).catch((e) => api.logger.warn?.(`${prefix}linear: failed to post minimal response: ${formatError(e)}`));
     }
 
     // ── Post-completion tasks (after response is posted) ──
 
     // Auto-close issue if agent ran on a "created" action and completed without error
     if (action === "created" && issueId && !agentError && resolveFlag(cfg.closeOnComplete, true)) {
-      autoCloseIssue(api, cfg, issueId).catch((e) => api.logger.warn?.(`linear: autoCloseIssue failed: ${e instanceof Error ? e.message : String(e)}`));
+      autoCloseIssue(api, cfg, issueId).catch((e) => api.logger.warn?.(`${prefix}linear: autoCloseIssue failed: ${formatError(e)}`));
     }
   } catch (err) {
     if (session) inflightSessions.delete(session);
     if (apiToken) revokeSessionToken(apiToken);
     if (session) cleanupSession(session);
     if (session) clearResponseFlag(session);
-    const msg = err instanceof Error ? err.message : String(err);
-    api.logger.warn?.(`linear agent run failed: ${msg}`);
+    const msg = formatError(err);
+    api.logger.warn?.(`${prefix}linear agent run failed: ${msg}`);
     // Post both an error AND a response to ensure the session ends.
     // activity/error alone does not end the Linear session — only activity/response does.
     postActivity(api, cfg, session, {
       type: "error",
       body: `Agent run failed: ${msg}`,
-    }).catch((postErr) => {
-      api.logger.warn?.(`linear: failed to post error to Linear: ${postErr instanceof Error ? postErr.message : String(postErr)}`);
+    }, { trace }).catch((postErr) => {
+      api.logger.warn?.(`${prefix}linear: failed to post error to Linear: ${formatError(postErr)}`);
     });
     postActivity(api, cfg, session, {
       type: "response",
       body: `Agent run failed: ${msg}`,
-    }).catch((postErr) => {
-      api.logger.warn?.(`linear: failed to post response to Linear: ${postErr instanceof Error ? postErr.message : String(postErr)}`);
+    }, { trace }).catch((postErr) => {
+      api.logger.warn?.(`${prefix}linear: failed to post response to Linear: ${formatError(postErr)}`);
     });
   }
 }
@@ -779,11 +808,12 @@ export async function postActivity(
   content: ActivityContent,
   opts: ActivityOptions = {},
 ): Promise<void> {
+  const prefix = tracePrefix(opts.trace);
   if (!session) {
-    api.logger.warn?.("linear postActivity: no session, skipping");
+    api.logger.warn?.(`${prefix}linear postActivity: no session, skipping`);
     return;
   }
-  api.logger.info?.(`linear postActivity: type=${content.type} session=${session.slice(0, 8)}... bodyLen=${typeof content.body === 'string' ? content.body.length : 0}`);
+  api.logger.info?.(`${prefix}linear postActivity: type=${content.type} session=${session.slice(0, 8)}... bodyLen=${typeof content.body === 'string' ? content.body.length : 0}`);
   const input: Record<string, unknown> = {
     agentSessionId: session,
     content,
@@ -796,15 +826,15 @@ export async function postActivity(
     variables: { input },
   });
   if (!result.ok) {
-    api.logger.warn?.(`linear postActivity: callLinear failed for type=${content.type}`);
+    api.logger.warn?.(`${prefix}linear postActivity: callLinear failed for type=${content.type}`);
     return;
   }
   const root = readObject(result.data!.agentActivityCreate);
   if (root && root.success === true) {
-    api.logger.info?.(`linear postActivity: success type=${content.type}`);
+    api.logger.info?.(`${prefix}linear postActivity: success type=${content.type}`);
     return;
   }
-  api.logger.warn?.(`linear postActivity: unexpected result: ${JSON.stringify(root).slice(0, 200)}`);
+  api.logger.warn?.(`${prefix}linear postActivity: unexpected result: ${JSON.stringify(root).slice(0, 200)}`);
 }
 
 async function updateSessionExternalUrl(
