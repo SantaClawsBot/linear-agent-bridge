@@ -28,6 +28,8 @@ const DEFAULT_MAX_AGE_DAYS = 365;
 const MAX_CANDIDATES = 50;
 /** Minimum confidence threshold to accept a suggestion. */
 const MIN_CONFIDENCE = 0.5;
+/** Confidence threshold above which no user confirmation is needed. */
+const HIGH_CONFIDENCE = 0.8;
 /** Cache TTL for org repo list. */
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
@@ -110,7 +112,7 @@ async function suggestRepo(
   issueId: string,
   sessionId: string,
   candidates: OrgRepo[],
-): Promise<OrgRepo | null> {
+): Promise<{ repo: OrgRepo; confidence: number } | null> {
   if (candidates.length === 0) return null;
 
   const result = await callLinear(api, cfg, "issueRepositorySuggestions", {
@@ -138,7 +140,7 @@ async function suggestRepo(
       const match = candidates.find(
         (r) => r.fullName === s.repositoryFullName && r.hostname === s.hostname,
       );
-      if (match) return match;
+      if (match) return { repo: match, confidence: s.confidence };
     }
   }
   return null;
@@ -169,7 +171,7 @@ export async function resolveRepoWithOrg(
   staticRepo: string,
   team: string,
   proj: string,
-): Promise<{ dir: string; suggested: boolean; repoName?: string }> {
+): Promise<{ dir: string; suggested: boolean; repoName?: string; confidence?: number; needsConfirmation?: boolean }> {
   if (!cfg.githubOrg) {
     return { dir: staticRepo, suggested: false };
   }
@@ -230,12 +232,13 @@ export async function resolveRepoWithOrg(
     return { dir: staticRepo, suggested: false };
   }
 
+  const confidence = match.confidence;
   api.logger.info?.(
-    `linear: repo suggestion matched ${match.fullName} for issue ${issueId.slice(0, 8)}...`,
+    `linear: repo suggestion matched ${match.repo.fullName} (${Math.round(confidence * 100)}% confidence) for issue ${issueId.slice(0, 8)}...`,
   );
 
   const baseDir = reposCacheDir();
-  const dir = ensureCloned(match, baseDir);
+  const dir = ensureCloned(match.repo, baseDir);
 
   // Auto-clone if the directory doesn't exist yet
   if (!existsSync(dir)) {
@@ -244,19 +247,19 @@ export async function resolveRepoWithOrg(
       const { execFile: ef } = await import("node:child_process");
       const { promisify: p } = await import("node:util");
       const pe = p(ef);
-      await pe("git", ["clone", "--depth", "1", match.cloneUrl, dir], {
+      await pe("git", ["clone", "--depth", "1", match.repo.cloneUrl, dir], {
         timeout: 120_000,
       });
-      api.logger.info?.(`linear: cloned ${match.fullName} to ${dir}`);
+      api.logger.info?.(`linear: cloned ${match.repo.fullName} to ${dir}`);
     } catch (err) {
       api.logger.warn?.(
-        `linear: failed to clone ${match.fullName}: ${err instanceof Error ? err.message : String(err)}`,
+        `linear: failed to clone ${match.repo.fullName}: ${err instanceof Error ? err.message : String(err)}`,
       );
       return { dir: staticRepo, suggested: false };
     }
   }
 
-  return { dir, suggested: true, repoName: match.fullName };
+  return { dir, suggested: true, repoName: match.repo.fullName, confidence, needsConfirmation: confidence < HIGH_CONFIDENCE };
 }
 
 /** Invalidate the org repos cache (for testing or manual refresh) */

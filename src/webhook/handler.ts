@@ -367,10 +367,12 @@ async function handleAgentEvent(
   // Resolve repo: try GitHub org-based auto-resolution if configured,
   // otherwise fall back to static mapping.
   let repo = staticRepo;
+  let repoResolution: { repoName?: string; confidence?: number; needsConfirmation?: boolean } | undefined;
   if (cfg.githubOrg && !staticRepo && session && issueId) {
     try {
       const resolved = await resolveRepoWithOrg(api, cfg, issueId, session, staticRepo, team, proj);
       repo = resolved.dir;
+      repoResolution = resolved;
       if (resolved.suggested && resolved.repoName) {
         api.logger.info?.(`linear: auto-resolved repo ${resolved.repoName} → ${repo}`);
       }
@@ -390,6 +392,28 @@ async function handleAgentEvent(
   // Post initial "thinking" activity
   const thought = buildThought(action, id, title);
   postActivity(api, cfg, session, { type: "thought", body: thought }, { ephemeral: true }).catch(() => {});
+
+  // Post repo resolution status and ask for confirmation if confidence is low
+  if (repoResolution?.repoName && session) {
+    const pct = Math.round((repoResolution.confidence ?? 0) * 100);
+    const repoThought = `Resolved repo: ${repoResolution.repoName} (${pct}% confidence)`;
+    postActivity(api, cfg, session, { type: "thought", body: repoThought }).catch(() => {});
+
+    if (repoResolution.needsConfirmation) {
+      postActivity(api, cfg, session, {
+        type: "elicitation",
+        body: `I'm planning to work in ${repoResolution.repoName} (${pct}% confidence). Is this the right repository?`,
+      }, {
+        signal: "select",
+        signalMeta: {
+          options: [
+            { value: `Yes, use ${repoResolution.repoName}` },
+            { value: "No, let me specify a different repo" },
+          ],
+        },
+      }).catch(() => {});
+    }
+  }
 
   // Fast-path for explicit close commands
   if (isCloseIntentPrompt(prompt)) {
