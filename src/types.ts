@@ -1,74 +1,12 @@
-import type { IncomingMessage, ServerResponse } from "node:http";
-
-export interface SubagentRunParams {
-  sessionKey: string;
-  message: string;
-  idempotencyKey?: string;
-  deliver?: boolean;
-  lane?: string;
-  lightContext?: boolean;
-  extraSystemPrompt?: string;
-  model?: string;
-  provider?: string;
-}
-
-export interface SubagentRunResult {
-  runId: string;
-}
-
-export interface SubagentWaitParams {
-  runId: string;
-  timeoutMs?: number;
-}
-
-export interface SubagentWaitResult {
-  status: "ok" | "error" | "timeout";
-  error?: string;
-}
-
-export interface SubagentMessagesParams {
-  sessionKey: string;
-  limit?: number;
-}
-
-export interface SubagentMessagesResult {
-  messages: Array<Record<string, unknown>>;
-}
-
-export interface OpenClawSubagentApi {
-  run: (params: SubagentRunParams) => Promise<SubagentRunResult>;
-  waitForRun: (params: SubagentWaitParams) => Promise<SubagentWaitResult>;
-  getSessionMessages: (params: SubagentMessagesParams) => Promise<SubagentMessagesResult>;
-  getSession: (params: SubagentMessagesParams) => Promise<SubagentMessagesResult>;
-  deleteSession: (params: { sessionKey: string }) => Promise<void>;
-}
-
-export interface OpenClawRuntimeApi {
-  subagent?: OpenClawSubagentApi;
-  config?: Record<string, unknown>;
-  channel?: Record<string, unknown>;
-  [key: string]: unknown;
-}
-
-export interface OpenClawPluginApi {
-  pluginConfig?: Record<string, unknown>;
-  config?: Record<string, unknown>;
-  logger: {
-    info?: (msg: string) => void;
-    warn?: (msg: string) => void;
-    error?: (msg: string) => void;
-    debug?: (msg: string) => void;
-  };
-  runtime?: OpenClawRuntimeApi;
-  registerHttpRoute: (opts: {
-    path: string;
-    auth?: string;
-    handler: (
-      req: IncomingMessage,
-      res: ServerResponse,
-    ) => void | Promise<void>;
-  }) => void;
-}
+// Plugin host API types come from OpenClaw itself. Import the real contract so
+// the compiler catches API-shape mistakes (e.g. api.subagent vs
+// api.runtime.subagent) instead of trusting a hand-written model that can drift
+// from the runtime. Bridge-specific types follow below.
+export type {
+  OpenClawPluginApi,
+  PluginRuntime,
+  PluginLogger,
+} from "openclaw/plugin-sdk";
 
 export interface PluginConfig {
   devAgentId?: string;

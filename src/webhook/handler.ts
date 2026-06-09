@@ -1052,27 +1052,32 @@ function normalizePayload(
   return out;
 }
 
-/** Extract the last assistant message text from a subagent session. */
+/** Extract the last assistant message text from a subagent session.
+ *  getSessionMessages returns { messages: unknown[] }, so each entry is narrowed
+ *  with readObject/readString rather than assumed to be a {role, content} shape. */
 async function extractLastAssistantText(
   api: OpenClawPluginApi,
   sessionKey: string,
 ): Promise<string | undefined> {
   const subagent = api.runtime?.subagent;
   if (!subagent?.getSessionMessages) return undefined;
-  const sessionMessages = await subagent.getSessionMessages({
-    sessionKey,
-    limit: 5,
-  });
-  const lastAssistant = [...(sessionMessages.messages || [])]
-    .reverse()
-    .find((m: Record<string, unknown>) => m.role === "assistant");
-  return typeof lastAssistant?.content === "string"
-    ? lastAssistant.content
-    : typeof lastAssistant?.content === "object" && lastAssistant?.content !== null
-      ? (Array.isArray(lastAssistant.content)
-        ? (lastAssistant.content as Array<Record<string, unknown>>).filter((p) => p.type === "text").map((p) => p.text ?? "").join("")
-        : String(lastAssistant.content))
-      : undefined;
+  const { messages } = await subagent.getSessionMessages({ sessionKey, limit: 5 });
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const msg = readObject(messages[i]);
+    if (!msg || msg.role !== "assistant") continue;
+    const content = msg.content;
+    if (typeof content === "string") return content;
+    if (Array.isArray(content)) {
+      return content
+        .map((part) => readObject(part))
+        .filter((part): part is Record<string, unknown> => Boolean(part) && part!.type === "text")
+        .map((part) => readString(part.text) ?? "")
+        .join("");
+    }
+    if (content && typeof content === "object") return String(content);
+    return undefined;
+  }
+  return undefined;
 }
 
 function logEvent(
