@@ -85,8 +85,6 @@ export interface PluginConfig {
   externalUrlLabel?: string;
   enableAgentApi?: boolean;
   apiBaseUrl?: string;
-  strictAddressing?: boolean;
-  mentionHandle?: string;
   apiCorsOrigins?: string[];
   apiCorsAllowCredentials?: boolean;
   /** Auto-close issue to "completed" when agent finishes successfully on a "created" action (default: true) */

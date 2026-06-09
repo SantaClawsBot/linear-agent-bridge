@@ -24,8 +24,6 @@ export function normalizeCfg(
     externalUrlLabel: readCfgString(cfg, "externalUrlLabel"),
     enableAgentApi: readCfgBool(cfg, "enableAgentApi"),
     apiBaseUrl: readCfgString(cfg, "apiBaseUrl"),
-    strictAddressing: readCfgBool(cfg, "strictAddressing"),
-    mentionHandle: readCfgString(cfg, "mentionHandle"),
     apiCorsOrigins: readCfgStringArray(cfg, "apiCorsOrigins"),
     apiCorsAllowCredentials: readCfgBool(cfg, "apiCorsAllowCredentials"),
     closeOnComplete: readCfgBool(cfg, "closeOnComplete"),
