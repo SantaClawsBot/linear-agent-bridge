@@ -44,6 +44,7 @@ import {
 import { buildAgentResponse } from "./response-parser.js";
 import { applyIssuePolicy, resolveReviewState, resolveIssueInfo, updateIssue } from "./issue-policy.js";
 import { isCloseIntentPrompt, closeIssueFromPrompt } from "./close-intent.js";
+import { resolveRepoWithOrg } from "./repo-resolver.js";
 import { shouldSkipPromptedRun, isSelfAuthoredComment } from "./skip-filter.js";
 import { createSessionToken, revokeSessionToken } from "../agent/session-token.js";
 import { buildEnrichedMessage } from "../agent/context-builder.js";
@@ -338,7 +339,7 @@ async function handleAgentEvent(
   const compactMessage = action === "prompted";
   const team = resolveKey(issue?.team);
   const proj = resolveKey(issue?.project);
-  const repo = resolveRepo(cfg, team, proj);
+  const staticRepo = resolveRepo(cfg, team, proj);
   const agent = cfg.devAgentId ?? "dev";
   const label = buildLabel(id, title);
   const session = resolveSessionId(data);
@@ -362,6 +363,21 @@ async function handleAgentEvent(
   const idem = delivery ?? randomUUID();
   const signal = resolveSignal(data);
   const deliver = Boolean(cfg.notifyChannel && cfg.notifyTo);
+
+  // Resolve repo: try GitHub org-based auto-resolution if configured,
+  // otherwise fall back to static mapping.
+  let repo = staticRepo;
+  if (cfg.githubOrg && !staticRepo && session && issueId) {
+    try {
+      const resolved = await resolveRepoWithOrg(api, cfg, issueId, session, staticRepo, team, proj);
+      repo = resolved.dir;
+      if (resolved.suggested && resolved.repoName) {
+        api.logger.info?.(`linear: auto-resolved repo ${resolved.repoName} → ${repo}`);
+      }
+    } catch (err) {
+      api.logger.warn?.(`linear: repo resolution failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
 
   // Handle stop signal
   if (signal === "stop") {

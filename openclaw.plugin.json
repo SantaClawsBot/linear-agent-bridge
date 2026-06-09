@@ -138,6 +138,10 @@
       "maxConcurrent": {
         "type": "number",
         "description": "Maximum simultaneous agent runs. Excess runs are queued. (default: 3, max: 20)"
+      },
+      "githubOrg": {
+        "type": "string",
+        "description": "GitHub organization name. If set, repos are auto-fetched and used with Linear's issueRepositorySuggestions to resolve the working directory for each issue."
       }
     }
   },
@@ -207,6 +211,11 @@
     "maxConcurrent": {
       "label": "Max concurrent agent runs",
       "description": "Maximum number of simultaneous agent runs. Excess runs are queued. (default: 3, max: 20)"
+    },
+    "githubOrg": {
+      "label": "GitHub org",
+      "description": "GitHub organization name for auto-resolving issue → repo mapping via Linear suggestions",
+      "placeholder": "my-org"
     }
   }
 }

@@ -30,6 +30,7 @@ export function normalizeCfg(
     apiCorsAllowCredentials: readCfgBool(cfg, "apiCorsAllowCredentials"),
     closeOnComplete: readCfgBool(cfg, "closeOnComplete"),
     maxConcurrent: readCfgNumber(cfg, "maxConcurrent"),
+    githubOrg: readCfgString(cfg, "githubOrg"),
   };
 }
 

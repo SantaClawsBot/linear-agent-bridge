@@ -47,6 +47,7 @@ src/
     close-intent.ts     — isCloseIntentPrompt, closeIssueFromPrompt
     skip-filter.ts      — shouldSkipPromptedRun, isSelfAuthoredComment
     concurrency.ts       — enqueueAgentRun / runAndDrain (bounds simultaneous agent runs)
+    repo-resolver.ts    — auto-resolve repos from GitHub org via Linear suggestions
   api/
     router.ts           — API endpoint router with bearer token auth
     base-url.ts         — auto-detects public URL from webhook Host header

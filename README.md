@@ -80,6 +80,7 @@ An [OpenClaw](https://github.com/nicepkg/openclaw) plugin that turns Linear's Ag
 - **Elicitation with Select** — the agent can present clickable option lists to users via the `select` signal
 - **External URL Linking** — attaches external links (e.g. CI dashboard, PR) to the Linear session
 - **Auto-Detection of Base URL** — works behind Tailscale or any reverse proxy; captures the public URL from the first webhook `Host` header
+- **GitHub Org Repo Resolution** — set `githubOrg` and repos are auto-fetched, matched to issues via Linear's AI-powered `issueRepositorySuggestions`, and shallow-cloned on demand
 
 ## Prerequisites
 
@@ -218,6 +219,7 @@ Authentication requires **one** of these modes:
 |--------|------|---------|-------------|
 | `closeOnComplete` | `boolean` | `true` | Auto-close issue to "completed" when agent finishes successfully on a `created` action |
 | `maxConcurrent` | `number` | `3` | Maximum simultaneous agent runs. Excess runs are queued. Capped at 20. |
+| `githubOrg` | `string` | — | GitHub organization name. If set, repos are auto-fetched and matched to issues via Linear's `issueRepositorySuggestions`. Clones repos on demand into `~/.openclaw/repos/<org>/<repo>`. Falls back to `defaultDir` or `repoByTeam`/`repoByProject` if no match above 50% confidence. |
 
 ### Notifications
 
@@ -251,6 +253,7 @@ Authentication requires **one** of these modes:
   "apiCorsAllowCredentials": false,
   "closeOnComplete": true,
   "maxConcurrent": 3,
+  "githubOrg": "my-github-org",
   "externalUrlBase": "https://dash.example.com/sessions/{session}"
 }
 ```

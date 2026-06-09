@@ -93,6 +93,8 @@ export interface PluginConfig {
   closeOnComplete?: boolean;
   /** Maximum concurrent agent runs (default: 3) */
   maxConcurrent?: number;
+  /** GitHub org name for auto-resolving repos via Linear suggestions */
+  githubOrg?: string;
 }
 
 
