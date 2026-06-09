@@ -91,6 +91,8 @@ export interface PluginConfig {
   apiCorsAllowCredentials?: boolean;
   /** Auto-close issue to "completed" when agent finishes successfully on a "created" action (default: true) */
   closeOnComplete?: boolean;
+  /** Maximum concurrent agent runs (default: 3) */
+  maxConcurrent?: number;
 }
 
 

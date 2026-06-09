@@ -29,6 +29,7 @@ export function normalizeCfg(
     apiCorsOrigins: readCfgStringArray(cfg, "apiCorsOrigins"),
     apiCorsAllowCredentials: readCfgBool(cfg, "apiCorsAllowCredentials"),
     closeOnComplete: readCfgBool(cfg, "closeOnComplete"),
+    maxConcurrent: readCfgNumber(cfg, "maxConcurrent"),
   };
 }
 
@@ -79,5 +80,14 @@ function readCfgStringArray(
     .map((v) => v.trim())
     .filter(Boolean);
   return values.length > 0 ? values : undefined;
+}
+
+function readCfgNumber(
+  cfg: Record<string, unknown>,
+  key: string,
+): number | undefined {
+  const raw = cfg[key];
+  if (typeof raw !== "number" || !Number.isFinite(raw)) return undefined;
+  return raw;
 }
 

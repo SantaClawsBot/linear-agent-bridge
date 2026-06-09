@@ -18,7 +18,6 @@ An [OpenClaw](https://github.com/nicepkg/openclaw) plugin that turns Linear's Ag
   - [Session Management](#session-management)
   - [Delegation](#delegation)
   - [Queries](#queries)
-  - [Git & Pull Request Workflow](#git--pull-request-workflow)
 - [Architecture](#architecture)
 - [Development](#development)
 - [Troubleshooting](#troubleshooting)
@@ -69,7 +68,11 @@ An [OpenClaw](https://github.com/nicepkg/openclaw) plugin that turns Linear's Ag
 
 - **Full Linear Agent Protocol** — implements `created`, `prompted`, `stop` signal, agent plans, activities (thought/action/elicitation/response/error), proactive sessions
 - **Rich Agent API** — during execution the agent can manage issues, post activities, update session plans, delegate work, query issue/team details, and more
-- **Session Deduplication** — prevents duplicate agent runs when Linear sends both AgentSession and Comment webhooks for the same event
+- **Concurrency Limiter** — bounds simultaneous agent runs (default: 3, configurable via `maxConcurrent`) to prevent OOM; excess runs are queued and dispatched as slots free up
+- **Multi-Phase Dispatch** — `created` actions are split into a 10-minute planning phase followed by a 30-minute execution phase, preventing context overflow on complex issues
+- **Keepalive Heartbeat** — posts ephemeral status during long agent runs to prevent Linear from marking the session as stopped
+- **OAuth Auto-Refresh** — automatically refreshes expired tokens using the stored refresh token, ensuring uninterrupted operation
+- **Session Deduplication** — prevents duplicate agent runs when Linear sends both AgentSession and Comment webhooks for the same event (5s dedup window with 1h stale cleanup)
 - **Close Intent Detection** — recognizes natural-language close commands in English and Russian ("close this task", "закрой задачу") and fast-paths them without a full agent run
 - **Per-Session Security** — each agent run gets a unique cryptographic bearer token scoped to its session; revoked on completion
 - **Issue Policies** — automatically moves issues to "started" state and delegates to the app user on session creation
@@ -195,13 +198,6 @@ Authentication requires **one** of these modes:
 | `apiCorsOrigins` | `string[]` | — | Allowed origins for CORS on `/plugins/linear/api`. Use `["*"]` to allow any origin |
 | `apiCorsAllowCredentials` | `boolean` | `false` | Adds `Access-Control-Allow-Credentials: true` when origin is explicitly allowed |
 
-### Git & Pull Requests
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `branchPrefix` | `string` | `"linear"` | Prefix for auto-generated branch names |
-| `prReportToLinear` | `boolean` | `true` | Auto-post PR URL to Linear session as external URL and activity |
-
 ### Addressing Controls
 
 | Option | Type | Default | Description |
@@ -215,6 +211,13 @@ Authentication requires **one** of these modes:
 |--------|------|-------------|
 | `externalUrlBase` | `string` | URL template for session links. Supports `{session}` and `{issue}` placeholders. Example: `https://dash.example.com/sessions/{session}` |
 | `externalUrlLabel` | `string` | Label for external links (default: `"OpenClaw session"`) |
+
+### Agent Behavior
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `closeOnComplete` | `boolean` | `true` | Auto-close issue to "completed" when agent finishes successfully on a `created` action |
+| `maxConcurrent` | `number` | `3` | Maximum simultaneous agent runs. Excess runs are queued. Capped at 20. |
 
 ### Notifications
 
@@ -246,6 +249,8 @@ Authentication requires **one** of these modes:
   "enableAgentApi": true,
   "apiCorsOrigins": ["https://linear.app", "https://linear.com"],
   "apiCorsAllowCredentials": false,
+  "closeOnComplete": true,
+  "maxConcurrent": 3,
   "externalUrlBase": "https://dash.example.com/sessions/{session}"
 }
 ```
@@ -339,19 +344,7 @@ The agent can ask the user to choose between options using the `select` signal:
 }
 ```
 
-### 7. End-to-End Issue to PR
-
-The most powerful use case: delegate an issue and the agent implements the code and submits a PR.
-
-1. The agent receives the issue via webhook
-2. Calls `pr/branch` to create an isolated branch
-3. Uses `exec` to implement the code changes
-4. Calls `pr/commit` to stage and commit
-5. Calls `pr/create` to push and open a pull request
-6. The PR URL is automatically posted back to the Linear session
-7. Calls `issue/close` to mark the issue as done
-
-### 8. Proactive Sessions
+### 7. Proactive Sessions
 
 The agent can create new sessions on other issues or comments without being explicitly delegated:
 
@@ -543,45 +536,6 @@ Returns ranked suggestions with confidence scores.
 
 No parameters. Returns the authenticated app's user ID.
 
-### Git & Pull Request Workflow
-
-These actions enable the agent to implement code changes and submit pull requests. They use `git` and `gh` (GitHub CLI) in the configured repository directory.
-
-#### `pr/branch` — Create a Branch for the Issue
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `branch` | `string` | No | Custom branch name (auto-generated if omitted) |
-| `base` | `string` | No | Base branch to branch from (defaults to HEAD) |
-
-Auto-generates a branch name from the issue identifier (e.g. `linear/ENG-123-fix-bug`). Uses the `branchPrefix` config (default: `"linear"`).
-
-#### `pr/commit` — Stage and Commit Changes
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `message` | `string` | No | Commit message (defaults to `ISSUE-123: Issue title`) |
-| `all` | `boolean` | No | Stage all changes with `git add -A` (default: `true`) |
-| `files` | `string[]` | No | Specific files to stage (only when `all: false`) |
-| `allowEmpty` | `boolean` | No | Allow empty commits (default: `false`) |
-
-#### `pr/create` — Push and Create a Pull Request
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `title` | `string` | No | PR title (defaults to `ISSUE-123 Issue title`) |
-| `body` | `string` | No | PR body (defaults to `Closes <issue URL>`) |
-| `base` | `string` | No | Target branch (default: `"main"`) |
-| `draft` | `boolean` | No | Create as draft PR (default: `false`) |
-| `labels` | `string[]` | No | Labels to apply |
-| `reviewers` | `string[]` | No | Reviewers to request |
-
-Pushes the current branch to origin and creates a PR via `gh pr create`. When `prReportToLinear` is enabled (default), the PR URL is automatically posted to the Linear session as an external URL and activity.
-
-#### `pr/status` — Check Git Status
-
-No parameters. Returns the current branch name, number of dirty files, porcelain status output, and the 5 most recent commits.
-
 ## Architecture
 
 ```
@@ -594,6 +548,10 @@ index.ts                          ← Entry point: registers HTTP routes
 │   ├── graphql/
 │   │   ├── queries.ts            ← GraphQL query strings
 │   │   └── mutations.ts          ← GraphQL mutation strings
+│   ├── oauth/
+│   │   ├── route.ts              ← OAuth code exchange endpoint (GET + POST)
+│   │   ├── refresh.ts            ← Automatic token refresh using stored refresh token
+│   │   └── token-store.ts        ← Persistent token storage with file permissions
 │   ├── webhook/
 │   │   ├── handler.ts            ← Main webhook handler + agent orchestration
 │   │   ├── validation.ts         ← HMAC-SHA256 signature verification
@@ -602,7 +560,8 @@ index.ts                          ← Entry point: registers HTTP routes
 │   │   ├── response-parser.ts    ← Parse agent output into response text
 │   │   ├── issue-policy.ts       ← Auto-start and auto-delegate policies
 │   │   ├── close-intent.ts       ← Natural language close detection
-│   │   └── skip-filter.ts        ← System echo and self-comment filtering
+│   │   ├── skip-filter.ts        ← System echo and self-comment filtering
+│   │   └── concurrency.ts        ← Concurrency limiter (queues excess agent runs)
 │   ├── api/
 │   │   ├── router.ts             ← API proxy router (bearer token auth)
 │   │   ├── base-url.ts           ← Auto-detect public URL from Host header
@@ -627,7 +586,10 @@ index.ts                          ← Entry point: registers HTTP routes
 | **Response Deduplication** | If the agent posts a response via the API, the handler skips auto-posting the text output |
 | **Cascading Session Resolution** | Direct field → in-memory cache → GraphQL query with retry (120ms/350ms/800ms backoff) |
 | **Side-Effect Registration** | API handlers register themselves via `registerApiHandler()` and are imported in `index.ts` |
-| **Dedup Window** | Prevents double agent runs when Linear sends both AgentSession + Comment webhooks (5s window) |
+| **Concurrency Queue** | Bounds agent runs to `maxConcurrent` (default: 3); excess runs wait in a FIFO queue |
+| **Multi-Phase Dispatch** | `created` actions run a planning phase first, then hand off to a subagent for execution |
+| **OAuth Token Refresh** | Expired tokens are automatically refreshed via the stored refresh token before API calls |
+| **Dedup Window** | Prevents double agent runs when Linear sends both AgentSession + Comment webhooks (5s window, 1h stale cleanup) |
 
 ## Development
 
