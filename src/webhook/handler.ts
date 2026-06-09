@@ -53,13 +53,14 @@ import { createSessionToken, revokeSessionToken } from "../agent/session-token.j
 import { buildEnrichedMessage } from "../agent/context-builder.js";
 import { cleanupSession } from "../agent/plan-manager.js";
 import { hasPostedResponse, clearResponseFlag } from "../agent/response-tracker.js";
+import { runEmbeddedLinearAgent } from "../agent/embedded-run.js";
 import { captureBaseUrl } from "../api/base-url.js";
 import { resolveTraceId, tracePrefix } from "./trace.js";
 import {
-  addActiveRunSessionKey,
   cancelActiveRunsForIssue,
   isActiveRunCanceled,
   registerActiveRun,
+  setActiveRunAbortController,
   unregisterActiveRun,
 } from "./active-runs.js";
 import { resolveDelegateUnassignment } from "./issue-events.js";
@@ -95,101 +96,6 @@ async function autoCloseIssue(
 }
 
 const MAX_BODY = 2 * 1024 * 1024;
-const AGENT_TIMEOUT_MS = 30 * 60 * 1000;
-
-// Multi-phase dispatch: split work across sequential agent runs
-// to avoid context overflow on complex issues.
-const PHASE_TIMEOUT_MS = 10 * 60 * 1000; // 10 min per phase
-
-const PHASE_PLAN_PROMPT_SUFFIX = [
-  "",
-  "---",
-  "## INSTRUCTIONS — PLANNING PHASE",
-  "",
-  "You are in the PLANNING phase. Your job is to investigate the issue and produce a concrete implementation plan.",
-  "",
-  "1. Read relevant files to understand the codebase.",
-  "2. Identify exactly which files need to change and how.",
-  "3. Output a plan as a structured markdown block.",
-  "",
-  "IMPORTANT: When you are done, call the activity/action action with your plan. Do NOT implement anything yet. Do NOT use activity/response — that ends the session prematurely.",
-  "Your plan will be handed to a fresh agent session for implementation.",
-  "",
-  "Use this format for your response:",
-  "```markdown",
-  "## Implementation Plan",
-  "### Files to modify",
-  "- `path/to/file.ts` — description of change",
-  "### Files to create  ",
-  "- `path/to/new-file.ts` — description",
-  "### Implementation steps",
-  "1. Step one (with enough detail that another agent can execute it)",
-  "2. Step two",
-  "...",
-  "### Testing",
-  "- How to verify the changes work",
-  "```",
-].join("\n");
-
-function buildExecPhaseMessage(
-  plan: string,
-  compact: boolean,
-  creds?: { apiToken: string; apiBaseUrl: string },
-): string {
-  const sections = [
-    "You are in the EXECUTION phase. A previous agent investigated the issue and produced this plan:",
-    "",
-    plan,
-    "",
-    "---",
-    "## INSTRUCTIONS — EXECUTION PHASE",
-    "",
-    "Execute the plan above exactly. Do NOT re-investigate — the plan is authoritative.",
-    "1. Create branches, edit files, commit changes as needed.",
-    "2. Run tests to verify.",
-    "3. If a PR workflow is available, create the PR.",
-    "4. When done, post an activity/action with a summary of what you did. Do NOT use activity/response — the system will post the final response.",
-    "",
-    "Be concise in your tool usage — use targeted reads (grep, sed, head) not whole-file cats.",
-  ];
-  // When compact (subagent mode), skip the full API docs and embed only a
-  // condensed reference. The subagent inherits the workspace and can use
-  // exec/gh CLI directly. For non-subagent (legacy) mode, the full API docs
-  // are prepended by the caller, so the compact section is omitted there.
-  //
-  // The per-session token and auto-detected base URL MUST be threaded in by
-  // the caller — there is no LINEAR_API_TOKEN/LINEAR_API_BASE_URL env var.
-  // Without a real token the subagent cannot reach the API proxy, so we omit
-  // the section entirely rather than hand it a non-working placeholder.
-  if (compact && creds?.apiToken) {
-    sections.push(
-      "",
-      "## Linear API (compact)",
-      "",
-      "You can call the Linear API proxy to post activities and manage issues.",
-      `Endpoint: POST ${creds.apiBaseUrl}`,
-      `Authorization: Bearer ${creds.apiToken}`,
-      "Content-Type: application/json",
-      "",
-      "Key actions:",
-      '- { action: "activity/thought", body: "text" }',
-      '- { action: "activity/action", activityAction: "verb", parameter: "subject", result: "text" }',
-      '- { action: "activity/response", body: "text" } — ONLY when completely done, ends session',
-      '- { action: "session/plan", plan: [{ content: "step", status: "inProgress" }] }',
-      '- { action: "query/issue" }',
-    );
-  }
-  return sections.join("\n");
-}
-
-
-
-
-function shouldUseMultiPhase(action: string, prompt: string): boolean {
-  // Only use multi-phase for "created" actions (new issues) with substantial prompts
-  // "prompted" (follow-ups) are usually shorter and don't need splitting
-  return action === "created";
-}
 
 // Guard against duplicate agent runs for the same session.
 // Linear sends both an AgentSessionEvent and a Comment webhook for the
@@ -488,7 +394,6 @@ async function handleAgentEvent(
 
   const key = normalizeKey(session || id || randomUUID());
   const sessionKey = `agent:${agent}:linear:${key}`;
-  const idem = delivery ?? randomUUID();
   const signal = resolveSignal(data);
   const deliver = Boolean(cfg.notifyChannel && cfg.notifyTo);
   let apiToken = "";
@@ -726,171 +631,68 @@ async function handleAgentEvent(
     let agentText: string | undefined;
     let agentError: string | undefined;
 
-    // ── Dispatch via subagent API ──
+    // ── Dispatch via runEmbeddedAgent ──
     //
-    // Uses the plugin SDK's subagent API to dispatch agent runs and wait
-    // for results. This is the public, stable interface for plugins.
-    //
-    // For "created" actions, uses multi-phase dispatch:
-    //   Phase 1 (PLAN): Agent investigates and produces a plan.
-    //   Phase 2 (EXEC): Fresh context executes the plan.
-    // Each phase gets its own sessionKey so the gateway creates
-    // a fresh agent session with clean context.
-    //
-    const subagent = api.runtime?.subagent;
-    const subagentAvailable = subagent && typeof subagent.run === "function";
-    if (!subagentAvailable) {
-      throw new Error("subagent API not available — ensure the plugin is running inside an OpenClaw gateway process");
-    }
-    const useMultiPhase = shouldUseMultiPhase(action, prompt);
-
-    // Keepalive: post ephemeral thoughts to Linear so the session
-    // isn't marked "stopped responding" during long agent runs.
-    // Linear expects an activity within ~10s of session creation
-    // and periodically thereafter.
-    let keepaliveTimer: ReturnType<typeof setInterval> | undefined;
-    let keepaliveAlive = true;
-    if (session && enableApi) {
-      const KEEPALIVE_INTERVAL_MS = 8_000;
-      keepaliveTimer = setInterval(() => {
-        if (!keepaliveAlive || currentRunCanceled()) return;
-        postActivityFireAndForget(api, cfg, trace, session, {
-          type: "thought",
-          body: "Working…",
-        }, { ephemeral: true });
-      }, KEEPALIVE_INTERVAL_MS);
-      if (keepaliveTimer.unref) keepaliveTimer.unref();
-    }
-
-    try {
-      if (currentRunCanceled()) {
-        api.logger.info?.(`${prefix}linear: run canceled before agent dispatch, session=${session ? session.slice(0, 8) + "..." : "(none)"}`);
-      } else if (useMultiPhase) {
-        // ── Multi-phase dispatch ──
-
-        // Phase 1: PLAN — investigate and produce a plan
-        const planSessionKey = `${sessionKey}:plan`;
-        if (issueId && session) addActiveRunSessionKey(issueId, session, planSessionKey);
-        api.logger.info?.(`${prefix}linear [phase=plan]: dispatching via subagent, sessionKey=${planSessionKey}`);
-        postActivityFireAndForget(api, cfg, trace, session, {
-          type: "thought",
-          body: "Investigating issue and planning implementation…",
-        }, { ephemeral: true });
-
-        const { runId: planRunId } = await subagent!.run({
-          sessionKey: planSessionKey,
-          message: message + PHASE_PLAN_PROMPT_SUFFIX,
-          idempotencyKey: `${idem}-plan`,
-          deliver: false,
-        });
-        const planWaitResult = await subagent!.waitForRun({
-          runId: planRunId,
-          timeoutMs: PHASE_TIMEOUT_MS,
-        });
-        let planText: string | undefined;
-        if (planWaitResult.status === "ok") {
-          planText = await extractLastAssistantText(api, planSessionKey);
-        } else {
-          agentError = planWaitResult.error || "Planning phase failed";
-        }
-        api.logger.info?.(`${prefix}linear [phase=plan]: completed, textLen=${planText?.length ?? 0}`);
-        // Intermediate phases may have posted activity/response despite instructions
-        // not to — clear the flag so the final response from the handler is posted.
-        if (session) clearResponseFlag(session);
-
-        if (currentRunCanceled()) {
-          api.logger.info?.(`${prefix}linear [phase=plan]: run canceled after planning, skipping execution phase`);
-        } else if (!planText || planText.length < 50) {
-          agentError = agentError || "Planning phase produced no useful output";
-        } else {
-          // Phase 2: EXEC — execute the plan
-          //
-          // Uses lightContext: true to avoid the Codex "blocked_tool_call" stall
-          // that happens with heavy bootstrap context.
-          //
-          const execSessionKey = `${sessionKey}:exec`;
-          if (issueId && session) addActiveRunSessionKey(issueId, session, execSessionKey);
-          postActivityFireAndForget(api, cfg, trace, session, {
-            type: "thought",
-            body: "Implementing the plan…",
-          }, { ephemeral: true });
-
-          const subagentApiBaseUrl = cfg.apiBaseUrl || (await import("../api/base-url.js")).getBaseUrl();
-          const execMessage = buildExecPhaseMessage(
-            planText,
-            true,
-            enableApi && apiToken
-              ? { apiToken, apiBaseUrl: subagentApiBaseUrl }
-              : undefined,
-          );
-
-          try {
-            const { runId: execRunId } = await subagent!.run({
-              sessionKey: execSessionKey,
-              message: execMessage,
-              idempotencyKey: `${idem}-exec`,
-              deliver: false,
-              lane: "subagent",
-              lightContext: true,
-            });
-            api.logger.info?.(`${prefix}linear [phase=exec]: subagent dispatched, runId=${execRunId}`);
-
-            const waitResult = await subagent!.waitForRun({
-              runId: execRunId,
-              timeoutMs: AGENT_TIMEOUT_MS,
-            });
-
-            if (currentRunCanceled()) {
-              api.logger.info?.(`${prefix}linear [phase=exec]: run canceled while waiting for subagent, skipping result collection`);
-            } else if (waitResult.status === "ok") {
-              agentText = await extractLastAssistantText(api, execSessionKey);
-              api.logger.info?.(`${prefix}linear [phase=exec]: subagent completed, textLen=${agentText?.length ?? 0}`);
-            } else if (waitResult.status === "timeout") {
-              agentError = "Execution phase timed out";
-              api.logger.warn?.(`${prefix}linear [phase=exec]: subagent timed out, runId=${execRunId}`);
-            } else {
-              agentError = waitResult.error || "Execution phase failed";
-              api.logger.warn?.(`${prefix}linear [phase=exec]: subagent error: ${agentError}, runId=${execRunId}`);
-            }
-          } catch (subagentErr) {
-            if (currentRunCanceled()) {
-              api.logger.info?.(`${prefix}linear [phase=exec]: run canceled during subagent execution`);
-            } else {
-              agentError = formatError(subagentErr);
-              api.logger.warn?.(`${prefix}linear [phase=exec]: subagent failed (${agentError})`);
-            }
-          }
-          // Clear response flag — the exec agent may have posted activity/response,
-          // but the handler should still post the final response after all phases complete.
-          if (session) clearResponseFlag(session);
-        }
-      } else {
-        // ── Single-phase dispatch (for prompted/follow-ups) ──
-        api.logger.info?.(`${prefix}linear: dispatching via subagent, sessionKey=${sessionKey}`);
-        const { runId: singleRunId } = await subagent!.run({
-          sessionKey,
-          message,
-          idempotencyKey: idem,
-          deliver: false,
-        });
-        const singleWaitResult = await subagent!.waitForRun({
-          runId: singleRunId,
-          timeoutMs: AGENT_TIMEOUT_MS,
-        });
-        if (singleWaitResult.status === "ok") {
-          agentText = await extractLastAssistantText(api, sessionKey);
-        } else {
-          agentError = singleWaitResult.error || "Agent run failed";
-        }
-        api.logger.info?.(`${prefix}linear: subagent completed, sessionKey=${sessionKey}, textLen=${agentText?.length ?? 0}`);
+    // One in-process agent turn via api.runtime.agent.runEmbeddedAgent (wrapped
+    // by runEmbeddedLinearAgent). Returns the assistant reply inline and honors
+    // an AbortController so a delegate-unassign cancel actually stops the run.
+    // Streaming callbacks surface progress as Linear thought/action activities,
+    // which replaces the old "Working…" keepalive loop.
+    if (currentRunCanceled()) {
+      api.logger.info?.(`${prefix}linear: run canceled before agent dispatch, session=${session ? session.slice(0, 8) + "..." : "(none)"}`);
+    } else {
+      // Register an abort controller for THIS run so cancelActiveRunsForIssue
+      // (e.g. delegate-unassignment) can abort the in-flight embedded run.
+      const abortController = new AbortController();
+      if (issueId && session) {
+        setActiveRunAbortController(issueId, session, abortController);
       }
-    } catch (dispatchErr) {
-      const dispatchMsg = formatError(dispatchErr);
-      api.logger.warn?.(`${prefix}linear: subagent dispatch failed (${dispatchMsg})`);
-      agentError = dispatchMsg;
-    } finally {
-      keepaliveAlive = false;
-      if (keepaliveTimer) clearInterval(keepaliveTimer);
+
+      // Keepalive backstop. Streaming callbacks surface progress as activities,
+      // but a long *silent* tool call (e.g. a build) could leave Linear with no
+      // activity and get the session marked "stopped responding". Post an
+      // ephemeral "Working…" only when nothing has streamed in the last window.
+      let lastActivityAt = Date.now();
+      const bumpActivity = (): void => {
+        lastActivityAt = Date.now();
+      };
+      const keepalive = setInterval(() => {
+        if (currentRunCanceled() || Date.now() - lastActivityAt < 8_000) return;
+        lastActivityAt = Date.now();
+        postActivityFireAndForget(api, cfg, trace, session, { type: "thought", body: "Working…" }, { ephemeral: true });
+      }, 8_000);
+      keepalive.unref?.();
+
+      api.logger.info?.(`${prefix}linear: dispatching via runEmbeddedAgent, sessionId=linear:${session}`);
+      try {
+        const runResult = await runEmbeddedLinearAgent(api, {
+          sessionId: `linear:${session}`,
+          prompt: message,
+          repoDir: repo,
+          agentId: agent,
+          abortSignal: abortController.signal,
+          onThought: (t) => {
+            bumpActivity();
+            if (t) {
+              postActivityFireAndForget(api, cfg, trace, session, { type: "thought", body: t }, { ephemeral: true });
+            }
+          },
+          onAction: (a) => {
+            bumpActivity();
+            postActivityFireAndForget(api, cfg, trace, session, {
+              type: "action",
+              action: a.action ?? "working",
+              result: a.result,
+            });
+          },
+        });
+        // runResult.aborted is handled by the canceled-run short-circuit below.
+        agentText = runResult.text;
+        agentError = runResult.error;
+        api.logger.info?.(`${prefix}linear: runEmbeddedAgent completed, textLen=${agentText?.length ?? 0}, aborted=${runResult.aborted}, error=${Boolean(agentError)}`);
+      } finally {
+        clearInterval(keepalive);
+      }
     }
 
     // ── Cleanup ──
@@ -1050,34 +852,6 @@ function normalizePayload(
   if (kind === "Comment" && !readObject(out.comment)) out.comment = nested;
   if (kind === "Issue" && !readObject(out.issue)) out.issue = nested;
   return out;
-}
-
-/** Extract the last assistant message text from a subagent session.
- *  getSessionMessages returns { messages: unknown[] }, so each entry is narrowed
- *  with readObject/readString rather than assumed to be a {role, content} shape. */
-async function extractLastAssistantText(
-  api: OpenClawPluginApi,
-  sessionKey: string,
-): Promise<string | undefined> {
-  const subagent = api.runtime?.subagent;
-  if (!subagent?.getSessionMessages) return undefined;
-  const { messages } = await subagent.getSessionMessages({ sessionKey, limit: 5 });
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const msg = readObject(messages[i]);
-    if (!msg || msg.role !== "assistant") continue;
-    const content = msg.content;
-    if (typeof content === "string") return content;
-    if (Array.isArray(content)) {
-      return content
-        .map((part) => readObject(part))
-        .filter((part): part is Record<string, unknown> => Boolean(part) && part!.type === "text")
-        .map((part) => readString(part.text) ?? "")
-        .join("");
-    }
-    if (content && typeof content === "object") return String(content);
-    return undefined;
-  }
-  return undefined;
 }
 
 function logEvent(

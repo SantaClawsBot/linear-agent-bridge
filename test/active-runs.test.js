@@ -5,9 +5,11 @@ import {
   cancelActiveRunsForIssue,
   clearActiveRunsForTesting,
   getActiveRun,
+  getActiveRunAbortController,
   isActiveRunCanceled,
   reapCanceledRuns,
   registerActiveRun,
+  setActiveRunAbortController,
   unregisterActiveRun,
 } from "../dist/src/webhook/active-runs.js";
 
@@ -58,6 +60,20 @@ test("a fresh cancel survives an immediate re-register (same-run protection)", (
   // NOT wipe a cancel that just targeted THIS run.
   registerActiveRun({ issueId: "issue-1", sessionId: "session-1", sessionKeys: ["k2"] });
   assert.equal(isActiveRunCanceled("issue-1", "session-1"), true);
+});
+
+test("cancelActiveRunsForIssue aborts the registered AbortController", () => {
+  clearActiveRunsForTesting();
+  registerActiveRun({ issueId: "issue-1", sessionId: "session-1", sessionKeys: ["k1"] });
+  const controller = new AbortController();
+  setActiveRunAbortController("issue-1", "session-1", controller);
+  assert.equal(getActiveRunAbortController("issue-1", "session-1"), controller);
+  assert.equal(controller.signal.aborted, false);
+
+  cancelActiveRunsForIssue("issue-1", "delegate-unassigned");
+
+  assert.equal(controller.signal.aborted, true);
+  assert.equal(controller.signal.reason, "delegate-unassigned");
 });
 
 test("reapCanceledRuns removes canceled records older than the max age", async () => {

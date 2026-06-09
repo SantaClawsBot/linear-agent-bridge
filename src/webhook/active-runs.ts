@@ -20,6 +20,7 @@ interface ActiveRunRecord {
   sessionKeys: Set<string>;
   canceledReason?: string;
   canceledAt?: number;
+  abortController?: AbortController;
 }
 
 const activeRunsByIssue = new Map<string, Map<string, ActiveRunRecord>>();
@@ -98,9 +99,29 @@ export function cancelActiveRunsForIssue(
   for (const record of issueRuns.values()) {
     record.canceledReason = reason;
     record.canceledAt = Date.now();
+    // Real abort: signal the in-flight runEmbeddedAgent call (cooperative
+    // canceledReason flag remains as a backstop for paths that poll it).
+    record.abortController?.abort(reason);
     snapshots.push(snapshot(record));
   }
   return snapshots;
+}
+
+export function setActiveRunAbortController(
+  issueId: string,
+  sessionId: string,
+  controller: AbortController,
+): void {
+  const record = activeRunsByIssue.get(issueId)?.get(sessionId);
+  if (!record) return;
+  record.abortController = controller;
+}
+
+export function getActiveRunAbortController(
+  issueId: string,
+  sessionId: string,
+): AbortController | undefined {
+  return activeRunsByIssue.get(issueId)?.get(sessionId)?.abortController;
 }
 
 /**
