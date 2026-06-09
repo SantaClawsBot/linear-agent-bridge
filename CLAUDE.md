@@ -40,13 +40,17 @@ src/
   webhook/
     handler.ts          — createLinearWebhook, handleWebhook, handleAgentEvent, postActivity
     validation.ts       — HMAC-SHA256 signature verification
-    session-resolver.ts — session ID cascading lookup + in-memory caches
-    message-builder.ts  — buildMessage, resolveAction, resolvePrompt, etc.
+    session-resolver.ts — resolveOwnedSessionId (read session id from the AgentSessionEvent payload + ownership check; no API calls)
+    session-serializer.ts — runSerialized: one run per Linear session at a time; drops duplicates, queues genuine follow-ups
+    message-builder.ts  — buildMessage, resolveAction, resolvePrompt, resolveGuidance, etc.
     response-parser.ts  — buildAgentResponse from agent payloads
     issue-policy.ts     — applyIssuePolicy, resolveStartedState, resolveCompletedState, updateIssue
     close-intent.ts     — isCloseIntentPrompt, closeIssueFromPrompt
     skip-filter.ts      — shouldSkipPromptedRun, isSelfAuthoredComment
     concurrency.ts       — enqueueAgentRun / runAndDrain (bounds simultaneous agent runs)
+    active-runs.ts      — per-issue active-run registry; cancel + reap canceled records
+    issue-events.ts     — resolveDelegateUnassignment (detects the agent being un-delegated via Issue update)
+    pending-repo.ts     — caches a low-confidence repo suggestion awaiting user confirmation
     repo-resolver.ts    — auto-resolve repos from GitHub org via Linear suggestions
   api/
     router.ts           — API endpoint router with bearer token auth
@@ -66,12 +70,13 @@ src/
 ### Webhook flow
 
 1. Linear sends POST to `/plugins/linear/linear`
-2. Validates HMAC signature, rejects stale webhooks (>60s), responds 202
-3. Filters out PermissionChange, OAuthApp, notifications, self-authored comments
-4. Resolves agent session ID (direct → cache → GraphQL with retry)
-5. Determines action (`created`/`prompted`), handles stop signal and close intent fast-paths
-6. Generates a per-session API token, builds enriched prompt with API documentation
-7. Calls agent via `callGateway`, revokes token and posts response on completion
+2. Validates HMAC signature (rejects when no secret is configured — fail closed), rejects stale webhooks (>60s), responds 202
+3. Filters out PermissionChange, OAuthApp, notifications, self-authored comments; handles `Issue` delegate-removal (cancels the issue's active runs)
+4. Resolves agent session ID directly from the payload and confirms we own it (ownership via payload appUser)
+5. Serializes per session (one run at a time) via the concurrency limiter + `runSerialized`
+6. Determines action (`created`/`prompted`), handles stop signal and close-intent fast-paths, and gates low-confidence repo confirmation
+7. Generates a per-session API token, builds enriched prompt with API documentation
+8. Calls agent via `callGateway` (multi-phase plan→exec for `created`), revokes token and posts response on completion
 
 ### Agent API proxy
 
@@ -91,7 +96,8 @@ Base URL is auto-detected from the `Host` header of incoming webhooks (Tailscale
 - **callLinear()** in `linear-client.ts` — single gateway for all Linear GraphQL calls (auth, error handling, logging)
 - **Session token scoping** — each agent run gets a unique bearer token tied to its session context; revoked on completion
 - **Response deduplication** — if agent posts a response via API, the handler skips auto-posting the text response
-- **Session ID resolution** — cascading: direct field → in-memory cache → GraphQL queries with retry (120/350/800ms)
+- **Session ID resolution** — read directly from the AgentSessionEvent payload (`created` and `prompted` both embed it); ownership confirmed from the payload's appUser. The plugin subscribes only to "Agent session events" (+ optionally "Issues" for cancel-on-unassign), not Comments, so no GraphQL comment→session fallback is needed
+- **Per-session serialization** — `runSerialized` ensures one run per Linear session at a time (queues genuine follow-ups, drops same-action/Comment-on-creation duplicates within a 5s window)
 - **API endpoint registration** — `registerApiHandler()` in router.ts; ops files register via side-effect imports
 
 ### Configuration

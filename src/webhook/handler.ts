@@ -24,9 +24,8 @@ import {
 import { verifySignature } from "./validation.js";
 import {
   resolveSessionId,
-  resolveSessionIdWithFallback,
+  resolveOwnedSessionId,
   resolveIssue,
-  rememberSessionHint,
 } from "./session-resolver.js";
 import {
   buildMessage,
@@ -406,19 +405,16 @@ async function handleWebhook(
   if (await handleIssueDelegateUnassignment(api, cfg, data, delivery)) {
     return;
   }
-  const sessionId = await resolveSessionIdWithFallback(api, cfg, data);
+  const sessionId = await resolveOwnedSessionId(api, cfg, data);
   if (!sessionId) {
-    if (kind) {
-      if (kind === "Comment") {
-        const topKeys = Object.keys(data).join(",");
-        const nested = readObject(data.data);
-        const nestedKeys = nested ? Object.keys(nested).join(",") : "";
-        api.logger.info?.(
-          `linear webhook ignored (${kind}) keys=[${topKeys}] dataKeys=[${nestedKeys}]`,
-        );
-      } else {
-        api.logger.info?.(`linear webhook ignored (${kind})`);
-      }
+    // Non-agent-session events reach here too — e.g. "Issue" updates we
+    // subscribe to for delegate-unassignment (handled above) and any other
+    // data-change events. They carry no agent session, so they are ignored.
+    // Keep high-volume data-change kinds at debug to avoid log spam.
+    if (kind === "Issue" || kind === "Comment") {
+      api.logger.debug?.(`linear webhook ignored (${kind})`);
+    } else if (kind) {
+      api.logger.info?.(`linear webhook ignored (${kind})`);
     }
     return;
   }
@@ -427,7 +423,6 @@ async function handleWebhook(
     : { ...data, agentSessionId: sessionId };
   const trace = resolveTraceId(eventData, delivery, sessionId);
   const tracedEventData = { ...eventData, linearTraceId: trace };
-  rememberSessionHint(tracedEventData, sessionId);
   // Dispatch through the concurrency limiter, wrapped by the per-session
   // serializer so two events for the same session never run concurrently and
   // corrupt the session-keyed in-process state.

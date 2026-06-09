@@ -30,7 +30,7 @@ An [OpenClaw](https://github.com/nicepkg/openclaw) plugin that turns Linear's Ag
                   │  Linear  │
                   │ Workspace│
                   └────┬─────┘
-                       │  Webhook (AgentSession / Comment)
+                       │  Webhook (AgentSession / Issue)
                        ▼
               ┌────────────────┐
               │  This Plugin   │
@@ -72,7 +72,7 @@ An [OpenClaw](https://github.com/nicepkg/openclaw) plugin that turns Linear's Ag
 - **Multi-Phase Dispatch** — `created` actions are split into a 10-minute planning phase followed by a 30-minute execution phase, preventing context overflow on complex issues
 - **Keepalive Heartbeat** — posts ephemeral status during long agent runs to prevent Linear from marking the session as stopped
 - **OAuth Auto-Refresh** — automatically refreshes expired tokens using the stored refresh token, ensuring uninterrupted operation
-- **Session Deduplication** — prevents duplicate agent runs when Linear sends both AgentSession and Comment webhooks for the same event (5s dedup window with 1h stale cleanup)
+- **Per-Session Serialization** — at most one run per Linear session at a time; duplicate deliveries for the same session within a 5s window are dropped, and genuine follow-ups are queued and run sequentially (prevents concurrent runs from corrupting session state)
 - **Close Intent Detection** — recognizes natural-language close commands in English and Russian ("close this task", "закрой задачу") and fast-paths them without a full agent run
 - **Per-Session Security** — each agent run gets a unique cryptographic bearer token scoped to its session; revoked on completion
 - **Issue Policies** — automatically moves issues to "started" state and delegates to the app user on session creation
@@ -119,7 +119,9 @@ The plugin registers itself with OpenClaw via the `openclaw` field in `package.j
 1. Go to **Linear Settings** > **API** > **Applications** > [Create new](https://linear.app/settings/api/applications/new)
 2. Set a recognizable name (this is how users will see the agent in mentions and filters)
 3. Enable **Webhooks**
-4. Under webhook events, select **Agent session events**
+4. Under webhook events:
+   - Select **Agent session events** (required). This delivers both new sessions (`created`) and all user follow-ups (`prompted`) — including comment replies inside the agent thread. You do **not** need the Comments category; Linear delivers thread replies as `prompted` automatically.
+   - Also select **Issues** if you want the agent to automatically cancel its in-progress runs when it is un-delegated from an issue. The plugin detects the delegate being removed via an `Issue` `update` webhook (`updatedFrom.delegateId`). Without this category, the cancel-on-unassign behavior is inert. Note that subscribing to Issues delivers all issue updates in the subscribed teams; the plugin ignores those that aren't a delegate removal.
 5. Set the webhook URL to: `https://<your-host>/plugins/linear/linear`
 
 ### 2. OAuth Installation
@@ -275,10 +277,12 @@ The plugin registers a POST endpoint at `/plugins/linear/linear`.
 | Event Type | Action | Result |
 |------------|--------|--------|
 | AgentSession `created` | New session | Full agent run with enriched prompt |
-| AgentSession `prompted` | Follow-up message | Agent continues with new context |
-| Comment (on agent thread) | Follow-up | Resolved to session, triggers `prompted` |
+| AgentSession `prompted` | Follow-up message (incl. comment replies in the thread) | Agent continues with new context |
+| Issue `update` (delegate removed) | Un-delegated from the agent | Cancels in-progress runs for that issue (requires the **Issues** webhook category) |
 | Signal `stop` | Halt | Agent posts stop confirmation, no run |
 | Close intent ("close task") | Fast-path | Issue closed directly, no agent run |
+
+> Follow-ups arrive as `prompted` AgentSessionEvents — the plugin does **not** rely on the separate Comments webhook and resolves the session directly from the payload (no extra API calls).
 
 ### What Gets Filtered
 
@@ -287,7 +291,7 @@ The plugin registers a POST endpoint at `/plugins/linear/linear`.
 - Self-authored comments (prevents feedback loops)
 - System echo messages (e.g. "Starting work on...", "Agent run failed:")
 - Empty prompts
-- Duplicate events within the dedup window (5 seconds)
+- Duplicate events for a session within the dedup window (5 seconds); additional follow-ups for an already-running session are serialized (run one at a time), not dropped
 
 ## Use Cases
 
@@ -594,7 +598,7 @@ index.ts                          ← Entry point: registers HTTP routes
 | **Concurrency Queue** | Bounds agent runs to `maxConcurrent` (default: 3); excess runs wait in a FIFO queue |
 | **Multi-Phase Dispatch** | `created` actions run a planning phase first, then hand off to a subagent for execution |
 | **OAuth Token Refresh** | Expired tokens are automatically refreshed via the stored refresh token before API calls |
-| **Dedup Window** | Prevents double agent runs when Linear sends both AgentSession + Comment webhooks (5s window, 1h stale cleanup) |
+| **Per-Session Serializer** | One run per Linear session at a time; drops duplicate deliveries within a 5s window, queues genuine follow-ups |
 
 ## Development
 
@@ -645,8 +649,15 @@ The handler is now available as `{ "action": "my/action" }` through the API prox
 
 ### 401 Unauthorized on webhook
 
+- **A signing secret is now required.** If `linearWebhookSecret` is not configured, the plugin rejects every webhook with 401 (fail-closed) rather than processing unauthenticated requests. Set `linearWebhookSecret` to the value from your Linear app settings.
 - Verify `linearWebhookSecret` matches the signing secret from Linear app settings
 - Check that the webhook is not stale (>60 seconds old) — clock sync issues can cause this
+
+### Agent keeps working after being un-delegated from an issue
+
+- The cancel-on-unassign behavior requires the **Issues** webhook category to be enabled in the Linear app settings (in addition to "Agent session events"). Without it, Linear never tells the plugin the delegate was removed, so in-progress runs are not canceled.
+- The Issues webhook is scoped to the teams the subscription covers — un-delegation in a team outside that scope won't be delivered.
+- Note that cancellation is cooperative: the plugin stops collecting results and suppresses the final response, but an already-dispatched agent may continue until it finishes or times out.
 
 ### Agent doesn't respond in Linear
 

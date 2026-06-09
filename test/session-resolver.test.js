@@ -1,99 +1,25 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  createSessionHintStore,
-  pickSessionIdFromComment,
   resolveSessionAppUserFromPayload,
+  resolveSessionId,
 } from "../dist/src/webhook/session-resolver.js";
 
-test("session hint store expires cached comment references", () => {
-  let now = 1_000;
-  const store = createSessionHintStore({ ttlMs: 100, now: () => now });
-  store.remember(
-    {
-      type: "Comment",
-      comment: { id: "comment-1", issueId: "issue-1" },
-    },
-    "session-1",
-  );
-
+test("resolveSessionId reads the session id directly from AgentSessionEvent payloads", () => {
+  // created: nested agentSession object
   assert.equal(
-    store.resolveCachedCommentSession({
-      type: "Comment",
-      comment: { id: "comment-1", issueId: "issue-1" },
-    }),
-    "session-1",
+    resolveSessionId({ type: "AgentSessionEvent", agentSession: { id: "s1" } }),
+    "s1",
   );
-
-  now = 1_101;
-
+  // prompted follow-up: the activity carries the session id
   assert.equal(
-    store.resolveCachedCommentSession({
-      type: "Comment",
-      comment: { id: "comment-1", issueId: "issue-1" },
-    }),
-    "",
+    resolveSessionId({ type: "AgentSessionEvent", agentActivity: { agentSessionId: "s2" } }),
+    "s2",
   );
-  assert.deepEqual(store.size(), { issues: 0, comments: 0 });
-});
-
-test("session hint store does not route unrelated comments by issue id", () => {
-  const store = createSessionHintStore({ ttlMs: 10_000, now: () => 1_000 });
-  store.remember(
-    {
-      type: "AgentSessionEvent",
-      agentSession: { id: "session-1", issue: { id: "issue-1" } },
-    },
-    "session-1",
-  );
-
-  assert.equal(
-    store.resolveCachedCommentSession({
-      type: "Comment",
-      comment: { id: "comment-2", issueId: "issue-1" },
-    }),
-    "",
-  );
-});
-
-test("session hint store keeps thread parent mappings for direct replies", () => {
-  const store = createSessionHintStore({ ttlMs: 10_000, now: () => 1_000 });
-  store.remember(
-    {
-      type: "Comment",
-      comment: { id: "comment-1", parentId: "root-1", issueId: "issue-1" },
-    },
-    "session-1",
-  );
-
-  assert.equal(
-    store.resolveCachedCommentSession({
-      type: "Comment",
-      comment: { id: "comment-2", parentId: "root-1", issueId: "issue-1" },
-    }),
-    "session-1",
-  );
-});
-
-test("pickSessionIdFromComment filters mixed ownership sessions", () => {
-  const comment = {
-    agentSessions: {
-      nodes: [
-        { id: "other-session", appUser: { id: "other-app" } },
-        { id: "our-session", appUser: { id: "our-app" } },
-      ],
-    },
-  };
-
-  assert.equal(pickSessionIdFromComment(comment, "our-app"), "our-session");
-});
-
-test("pickSessionIdFromComment keeps backward compatibility when appUser is absent", () => {
-  const comment = {
-    agentSession: { id: "legacy-session" },
-  };
-
-  assert.equal(pickSessionIdFromComment(comment, "our-app"), "legacy-session");
+  // flat string field
+  assert.equal(resolveSessionId({ agentSessionId: "s3" }), "s3");
+  // nothing to resolve (e.g. an Issue webhook with no agent session)
+  assert.equal(resolveSessionId({ type: "Issue", id: "i1" }), "");
 });
 
 test("resolveSessionAppUserFromPayload reads top-level appUserId", () => {
@@ -103,5 +29,14 @@ test("resolveSessionAppUserFromPayload reads top-level appUserId", () => {
       agentSession: { id: "session-1" },
     }),
     "app-1",
+  );
+});
+
+test("resolveSessionAppUserFromPayload reads nested agentSession.appUser.id", () => {
+  assert.equal(
+    resolveSessionAppUserFromPayload({
+      agentSession: { id: "s1", appUser: { id: "app-2" } },
+    }),
+    "app-2",
   );
 });

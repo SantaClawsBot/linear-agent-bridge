@@ -69,27 +69,6 @@ export const TEAM_DETAIL_QUERY = `
   }
 `;
 
-export const COMMENT_SESSION_QUERY = `
-  query CommentSession($id: String!) {
-    comment(id: $id) {
-      id
-      parentId
-      agentSession { id appUser { id } }
-      agentSessions(first: 3) {
-        nodes { id appUser { id } }
-      }
-      parent {
-        id
-        parentId
-        agentSession { id appUser { id } }
-        agentSessions(first: 3) {
-          nodes { id appUser { id } }
-        }
-      }
-    }
-  }
-`;
-
 export const REPO_SUGGESTIONS_QUERY = `
   query RepoSuggestions(
     $issueId: String!,
