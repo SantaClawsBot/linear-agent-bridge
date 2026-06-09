@@ -10,7 +10,7 @@ import type {
   ActivityOptions,
 } from "../types.js";
 import { normalizeCfg } from "../config.js";
-import { callLinear } from "../linear-client.js";
+import { callLinear, resolveViewer } from "../linear-client.js";
 import { ACTIVITY_MUTATION, SESSION_UPDATE_MUTATION } from "../graphql/mutations.js";
 import {
   readBody,
@@ -52,6 +52,14 @@ import { cleanupSession } from "../agent/plan-manager.js";
 import { hasPostedResponse, clearResponseFlag } from "../agent/response-tracker.js";
 import { captureBaseUrl } from "../api/base-url.js";
 import { resolveTraceId, tracePrefix } from "./trace.js";
+import {
+  addActiveRunSessionKey,
+  cancelActiveRunsForIssue,
+  isActiveRunCanceled,
+  registerActiveRun,
+  unregisterActiveRun,
+} from "./active-runs.js";
+import { resolveDelegateUnassignment } from "./issue-events.js";
 
 const callRef: { value?: (opts: Record<string, unknown>) => Promise<unknown> } = {};
 
@@ -203,6 +211,85 @@ function postActivityFireAndForget(
   });
 }
 
+async function handleIssueDelegateUnassignment(
+  api: OpenClawPluginApi,
+  cfg: PluginConfig,
+  data: Record<string, unknown>,
+  delivery: string | undefined,
+): Promise<boolean> {
+  const kind = readString(data.type) ?? "";
+  const action = readString(data.action) ?? "";
+  if (kind !== "Issue" || action !== "update") return false;
+
+  const updatedFrom = readObject(data.updatedFrom);
+  if (!updatedFrom || !hasDelegateChange(updatedFrom)) return false;
+
+  const trace = resolveTraceId(data, delivery, "");
+  const prefix = tracePrefix(trace);
+  let viewerId = "";
+  try {
+    viewerId = await resolveViewer(api, cfg);
+  } catch (err) {
+    api.logger.warn?.(`${prefix}linear: failed to resolve viewer for delegate removal: ${formatError(err)}`);
+    return false;
+  }
+
+  const unassignment = resolveDelegateUnassignment(data, viewerId);
+  if (!unassignment) return false;
+
+  const canceled = cancelActiveRunsForIssue(
+    unassignment.issueId,
+    "delegate-unassigned",
+  );
+  if (canceled.length === 0) {
+    api.logger.info?.(
+      `${prefix}linear issue delegate removed from app user; no active runs for issue ${unassignment.issueId.slice(0, 8)}...`,
+    );
+    return true;
+  }
+
+  api.logger.info?.(
+    `${prefix}linear issue delegate removed from app user; canceling ${canceled.length} active run(s) for issue ${unassignment.issueId.slice(0, 8)}...`,
+  );
+  for (const run of canceled) {
+    if (run.apiToken) revokeSessionToken(run.apiToken);
+    if (run.sessionId) {
+      cleanupSession(run.sessionId);
+      clearResponseFlag(run.sessionId);
+    }
+    for (const sessionKey of run.sessionKeys) {
+      deleteAgentSession(api, trace, sessionKey);
+    }
+    postActivityFireAndForget(api, cfg, trace, run.sessionId, {
+      type: "response",
+      body: "Canceled because this issue is no longer delegated to me.",
+    });
+  }
+  return true;
+}
+
+function hasDelegateChange(data: Record<string, unknown>): boolean {
+  return (
+    Object.prototype.hasOwnProperty.call(data, "delegateId") ||
+    Object.prototype.hasOwnProperty.call(data, "delegate")
+  );
+}
+
+function deleteAgentSession(
+  api: OpenClawPluginApi,
+  trace: string,
+  sessionKey: string,
+): void {
+  const deleteSession = api.subagent?.deleteSession;
+  if (!deleteSession) return;
+  const prefix = tracePrefix(trace);
+  deleteSession.call(api.subagent, { sessionKey }).catch((err) => {
+    api.logger.warn?.(
+      `${prefix}linear: failed to delete agent session ${sessionKey}: ${formatError(err)}`,
+    );
+  });
+}
+
 export function createLinearWebhook(
   api: OpenClawPluginApi,
 ): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
@@ -281,6 +368,9 @@ async function handleWebhook(
     return;
   }
   if (await isSelfAuthoredComment(api, cfg, data)) {
+    return;
+  }
+  if (await handleIssueDelegateUnassignment(api, cfg, data, delivery)) {
     return;
   }
   const sessionId = await resolveSessionIdWithFallback(api, cfg, data);
@@ -370,6 +460,28 @@ async function handleAgentEvent(
   const idem = delivery ?? randomUUID();
   const signal = resolveSignal(data);
   const deliver = Boolean(cfg.notifyChannel && cfg.notifyTo);
+  let apiToken = "";
+  let registeredActiveRun = false;
+
+  const markCurrentRunActive = (): void => {
+    if (!issueId || !session) return;
+    registerActiveRun({
+      issueId,
+      sessionId: session,
+      apiToken,
+      sessionKeys: [sessionKey],
+    });
+    registeredActiveRun = true;
+  };
+  const unregisterCurrentRun = (): void => {
+    if (!registeredActiveRun || !issueId || !session) return;
+    unregisterActiveRun(issueId, session);
+    registeredActiveRun = false;
+  };
+  const currentRunCanceled = (): boolean =>
+    Boolean(issueId && session && isActiveRunCanceled(issueId, session));
+
+  markCurrentRunActive();
 
   // Resolve repo: try GitHub org-based auto-resolution if configured,
   // otherwise fall back to static mapping.
@@ -388,9 +500,19 @@ async function handleAgentEvent(
     }
   }
 
+  if (currentRunCanceled()) {
+    api.logger.info?.(`${prefix}linear: run canceled before dispatch, session=${session ? session.slice(0, 8) + "..." : "(none)"}`);
+    if (session) inflightSessions.delete(session);
+    if (session) cleanupSession(session);
+    if (session) clearResponseFlag(session);
+    unregisterCurrentRun();
+    return;
+  }
+
   // Handle stop signal
   if (signal === "stop") {
     if (session) inflightSessions.delete(session);
+    unregisterCurrentRun();
     const text = buildStopText(id, title);
     postActivityFireAndForget(api, cfg, trace, session, { type: "response", body: text });
     return;
@@ -425,9 +547,14 @@ async function handleAgentEvent(
   // Fast-path for explicit close commands
   if (isCloseIntentPrompt(prompt)) {
     if (session) inflightSessions.delete(session);
-    const closeText = issueId
-      ? await closeIssueFromPrompt(api, cfg, issueId, id, title)
-      : "Не удалось определить задачу для закрытия.";
+    let closeText = "Не удалось определить задачу для закрытия.";
+    try {
+      closeText = issueId
+        ? await closeIssueFromPrompt(api, cfg, issueId, id, title)
+        : closeText;
+    } finally {
+      unregisterCurrentRun();
+    }
     postActivityFireAndForget(api, cfg, trace, session, { type: "response", body: closeText });
     return;
   }
@@ -452,7 +579,6 @@ async function handleAgentEvent(
   // Generate per-session API token for agent to call back
   const enableApi = cfg.enableAgentApi !== false;
   api.logger.info?.(`${prefix}linear handler: enableApi=${enableApi} session=${session ? session.slice(0, 8) + "..." : "(none)"} issueId=${issueId.slice(0, 8) || "(none)"}`);
-  let apiToken = "";
   if (enableApi && session) {
     const sessionCtx = {
       sessionId: session,
@@ -466,6 +592,7 @@ async function handleAgentEvent(
     };
     apiToken = createSessionToken(sessionCtx);
     sessionCtx.apiToken = apiToken;
+    markCurrentRunActive();
   }
 
   // Build agent message — enriched with API docs if API is enabled
@@ -537,7 +664,7 @@ async function handleAgentEvent(
     if (session && enableApi) {
       const KEEPALIVE_INTERVAL_MS = 8_000;
       keepaliveTimer = setInterval(() => {
-        if (!keepaliveAlive) return;
+        if (!keepaliveAlive || currentRunCanceled()) return;
         postActivityFireAndForget(api, cfg, trace, session, {
           type: "thought",
           body: "Working…",
@@ -549,11 +676,14 @@ async function handleAgentEvent(
     try {
       const call = await loadCallGateway(api);
 
-      if (useMultiPhase) {
+      if (currentRunCanceled()) {
+        api.logger.info?.(`${prefix}linear: run canceled before agent dispatch, session=${session ? session.slice(0, 8) + "..." : "(none)"}`);
+      } else if (useMultiPhase) {
         // ── Multi-phase dispatch ──
 
         // Phase 1: PLAN — investigate and produce a plan
         const planSessionKey = `${sessionKey}:plan`;
+        if (issueId && session) addActiveRunSessionKey(issueId, session, planSessionKey);
         api.logger.info?.(`${prefix}linear [phase=plan]: dispatching, sessionKey=${planSessionKey}`);
         postActivityFireAndForget(api, cfg, trace, session, {
           type: "thought",
@@ -577,7 +707,9 @@ async function handleAgentEvent(
         // not to — clear the flag so the final response from the handler is posted.
         if (session) clearResponseFlag(session);
 
-        if (!planText || planText.length < 50) {
+        if (currentRunCanceled()) {
+          api.logger.info?.(`${prefix}linear [phase=plan]: run canceled after planning, skipping execution phase`);
+        } else if (!planText || planText.length < 50) {
           agentError = "Planning phase produced no useful output";
         } else {
           // Phase 2: EXEC — execute the plan
@@ -589,6 +721,7 @@ async function handleAgentEvent(
           // giving the agent a smaller initial context that doesn't stall.
           //
           const execSessionKey = `${sessionKey}:exec`;
+          if (issueId && session) addActiveRunSessionKey(issueId, session, execSessionKey);
           postActivityFireAndForget(api, cfg, trace, session, {
             type: "thought",
             body: "Implementing the plan…",
@@ -618,7 +751,9 @@ async function handleAgentEvent(
                 timeoutMs: AGENT_TIMEOUT_MS,
               });
 
-              if (waitResult.status === "ok") {
+              if (currentRunCanceled()) {
+                api.logger.info?.(`${prefix}linear [phase=exec]: run canceled while waiting for subagent, skipping result collection`);
+              } else if (waitResult.status === "ok") {
                 const sessionMessages = await api.subagent!.getSessionMessages({
                   sessionKey: execSessionKey,
                   limit: 5,
@@ -642,33 +777,37 @@ async function handleAgentEvent(
                 api.logger.warn?.(`${prefix}linear [phase=exec]: subagent error: ${agentError}, runId=${runId}`);
               }
             } catch (subagentErr) {
-              // Subagent unavailable or failed — fall back to callGateway
-              const errMsg = formatError(subagentErr);
-              api.logger.warn?.(`${prefix}linear [phase=exec]: subagent failed (${errMsg}), falling back to callGateway`);
-              const execApiBaseUrl = cfg.apiBaseUrl || (await import("../api/base-url.js")).getBaseUrl();
-              const fallbackMessage = enableApi && apiToken
-                ? buildEnrichedMessage({
-                    action: "created",
-                    id, title, url, desc, guidance,
-                    prompt: "",
-                    repo, session, context,
-                    compact: false,
-                    apiBaseUrl: execApiBaseUrl, apiToken, issueId, teamId, repoDir: repo,
-                  }) + "\n\n---\n" + buildExecPhaseMessage(planText, false)
-                : buildExecPhaseMessage(planText, false);
-              const execResult = await call({
-                method: "agent",
-                params: {
-                  message: fallbackMessage,
-                  sessionKey: execSessionKey,
-                  label: `${label} [exec]`,
-                  idempotencyKey: `${idem}-exec`,
-                },
-                expectFinal: true,
-                timeoutMs: AGENT_TIMEOUT_MS,
-              });
-              agentText = buildAgentResponse(execResult);
-              api.logger.info?.(`${prefix}linear [phase=exec]: callGateway fallback completed, textLen=${agentText?.length ?? 0}`);
+              if (currentRunCanceled()) {
+                api.logger.info?.(`${prefix}linear [phase=exec]: run canceled during subagent execution, skipping fallback`);
+              } else {
+                // Subagent unavailable or failed — fall back to callGateway
+                const errMsg = formatError(subagentErr);
+                api.logger.warn?.(`${prefix}linear [phase=exec]: subagent failed (${errMsg}), falling back to callGateway`);
+                const execApiBaseUrl = cfg.apiBaseUrl || (await import("../api/base-url.js")).getBaseUrl();
+                const fallbackMessage = enableApi && apiToken
+                  ? buildEnrichedMessage({
+                      action: "created",
+                      id, title, url, desc, guidance,
+                      prompt: "",
+                      repo, session, context,
+                      compact: false,
+                      apiBaseUrl: execApiBaseUrl, apiToken, issueId, teamId, repoDir: repo,
+                    }) + "\n\n---\n" + buildExecPhaseMessage(planText, false)
+                  : buildExecPhaseMessage(planText, false);
+                const execResult = await call({
+                  method: "agent",
+                  params: {
+                    message: fallbackMessage,
+                    sessionKey: execSessionKey,
+                    label: `${label} [exec]`,
+                    idempotencyKey: `${idem}-exec`,
+                  },
+                  expectFinal: true,
+                  timeoutMs: AGENT_TIMEOUT_MS,
+                });
+                agentText = buildAgentResponse(execResult);
+                api.logger.info?.(`${prefix}linear [phase=exec]: callGateway fallback completed, textLen=${agentText?.length ?? 0}`);
+              }
             }
           } else {
             // ── Legacy path: callGateway with full context (may stall) ──
@@ -729,9 +868,17 @@ async function handleAgentEvent(
     }
 
     // ── Cleanup ──
+    const canceled = currentRunCanceled();
     if (session) inflightSessions.delete(session);
     if (apiToken) revokeSessionToken(apiToken);
     if (session) cleanupSession(session);
+    unregisterCurrentRun();
+
+    if (canceled) {
+      if (session) clearResponseFlag(session);
+      api.logger.info?.(`${prefix}linear: agent run canceled, skipping final response and post-completion tasks`);
+      return;
+    }
 
     const hasAgentResponse = session && hasPostedResponse(session);
     api.logger.info?.(`${prefix}linear: agent run done, session=${session ? session.slice(0, 8) + "..." : "(none)"}, hasResponse=${Boolean(hasAgentResponse)}, error=${Boolean(agentError)}, textLen=${agentText?.length ?? 0}`);
@@ -778,10 +925,16 @@ async function handleAgentEvent(
       autoCloseIssue(api, cfg, issueId).catch((e) => api.logger.warn?.(`${prefix}linear: autoCloseIssue failed: ${formatError(e)}`));
     }
   } catch (err) {
+    const canceled = currentRunCanceled();
     if (session) inflightSessions.delete(session);
     if (apiToken) revokeSessionToken(apiToken);
     if (session) cleanupSession(session);
     if (session) clearResponseFlag(session);
+    unregisterCurrentRun();
+    if (canceled) {
+      api.logger.info?.(`${prefix}linear: agent run canceled after error, skipping error response`);
+      return;
+    }
     const msg = formatError(err);
     api.logger.warn?.(`${prefix}linear agent run failed: ${msg}`);
     // Post both an error AND a response to ensure the session ends.
