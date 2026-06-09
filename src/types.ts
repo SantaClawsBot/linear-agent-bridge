@@ -43,6 +43,13 @@ export interface OpenClawSubagentApi {
   deleteSession: (params: { sessionKey: string }) => Promise<void>;
 }
 
+export interface OpenClawRuntimeApi {
+  subagent?: OpenClawSubagentApi;
+  config?: Record<string, unknown>;
+  channel?: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
 export interface OpenClawPluginApi {
   pluginConfig?: Record<string, unknown>;
   config?: Record<string, unknown>;
@@ -52,8 +59,7 @@ export interface OpenClawPluginApi {
     error?: (msg: string) => void;
     debug?: (msg: string) => void;
   };
-  subagent?: OpenClawSubagentApi;
-  runtime?: Record<string, unknown>;
+  runtime?: OpenClawRuntimeApi;
   registerHttpRoute: (opts: {
     path: string;
     auth?: string;

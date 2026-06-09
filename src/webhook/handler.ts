@@ -297,10 +297,10 @@ function deleteAgentSession(
   trace: string,
   sessionKey: string,
 ): void {
-  const deleteSession = api.subagent?.deleteSession;
+  const deleteSession = api.runtime?.subagent?.deleteSession;
   if (!deleteSession) return;
   const prefix = tracePrefix(trace);
-  deleteSession.call(api.subagent, { sessionKey }).catch((err) => {
+  deleteSession.call(api.runtime?.subagent, { sessionKey }).catch((err) => {
     api.logger.warn?.(
       `${prefix}linear: failed to delete agent session ${sessionKey}: ${formatError(err)}`,
     );
@@ -737,7 +737,8 @@ async function handleAgentEvent(
     // Each phase gets its own sessionKey so the gateway creates
     // a fresh agent session with clean context.
     //
-    const subagentAvailable = api.subagent && typeof api.subagent.run === "function";
+    const subagent = api.runtime?.subagent;
+    const subagentAvailable = subagent && typeof subagent.run === "function";
     if (!subagentAvailable) {
       throw new Error("subagent API not available — ensure the plugin is running inside an OpenClaw gateway process");
     }
@@ -776,13 +777,13 @@ async function handleAgentEvent(
           body: "Investigating issue and planning implementation…",
         }, { ephemeral: true });
 
-        const { runId: planRunId } = await api.subagent!.run({
+        const { runId: planRunId } = await subagent!.run({
           sessionKey: planSessionKey,
           message: message + PHASE_PLAN_PROMPT_SUFFIX,
           idempotencyKey: `${idem}-plan`,
           deliver: false,
         });
-        const planWaitResult = await api.subagent!.waitForRun({
+        const planWaitResult = await subagent!.waitForRun({
           runId: planRunId,
           timeoutMs: PHASE_TIMEOUT_MS,
         });
@@ -824,7 +825,7 @@ async function handleAgentEvent(
           );
 
           try {
-            const { runId: execRunId } = await api.subagent!.run({
+            const { runId: execRunId } = await subagent!.run({
               sessionKey: execSessionKey,
               message: execMessage,
               idempotencyKey: `${idem}-exec`,
@@ -834,7 +835,7 @@ async function handleAgentEvent(
             });
             api.logger.info?.(`${prefix}linear [phase=exec]: subagent dispatched, runId=${execRunId}`);
 
-            const waitResult = await api.subagent!.waitForRun({
+            const waitResult = await subagent!.waitForRun({
               runId: execRunId,
               timeoutMs: AGENT_TIMEOUT_MS,
             });
@@ -866,13 +867,13 @@ async function handleAgentEvent(
       } else {
         // ── Single-phase dispatch (for prompted/follow-ups) ──
         api.logger.info?.(`${prefix}linear: dispatching via subagent, sessionKey=${sessionKey}`);
-        const { runId: singleRunId } = await api.subagent!.run({
+        const { runId: singleRunId } = await subagent!.run({
           sessionKey,
           message,
           idempotencyKey: idem,
           deliver: false,
         });
-        const singleWaitResult = await api.subagent!.waitForRun({
+        const singleWaitResult = await subagent!.waitForRun({
           runId: singleRunId,
           timeoutMs: AGENT_TIMEOUT_MS,
         });
@@ -1056,7 +1057,9 @@ async function extractLastAssistantText(
   api: OpenClawPluginApi,
   sessionKey: string,
 ): Promise<string | undefined> {
-  const sessionMessages = await api.subagent!.getSessionMessages({
+  const subagent = api.runtime?.subagent;
+  if (!subagent?.getSessionMessages) return undefined;
+  const sessionMessages = await subagent.getSessionMessages({
     sessionKey,
     limit: 5,
   });
