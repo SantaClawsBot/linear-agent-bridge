@@ -114,8 +114,8 @@ const PHASE_PLAN_PROMPT_SUFFIX = [
   "```",
 ].join("\n");
 
-function buildExecPhaseMessage(plan: string): string {
-  return [
+function buildExecPhaseMessage(plan: string, compact: boolean): string {
+  const sections = [
     "You are in the EXECUTION phase. A previous agent investigated the issue and produced this plan:",
     "",
     plan,
@@ -130,7 +130,29 @@ function buildExecPhaseMessage(plan: string): string {
     "4. When done, post an activity/action with a summary of what you did. Do NOT use activity/response — the system will post the final response.",
     "",
     "Be concise in your tool usage — use targeted reads (grep, sed, head) not whole-file cats.",
-  ].join("\n");
+  ];
+  // When compact (subagent mode), skip the full API docs.
+  // The subagent inherits the workspace and can use exec/gh CLI directly.
+  // For non-subagent (legacy) mode, the full API docs are prepended by the caller.
+  if (compact) {
+    sections.push(
+      "",
+      "## Linear API (compact)",
+      "",
+      "You can call the Linear API proxy to post activities and manage issues.",
+      `Endpoint: POST ${(process.env.LINEAR_API_BASE_URL || "http://127.0.0.1:8189/plugins/linear/api")}`,
+      `Authorization: Bearer ${(process.env.LINEAR_API_TOKEN || "(see your session token)")}`,
+      "Content-Type: application/json",
+      "",
+      "Key actions:",
+      '- { action: "activity/thought", body: "text" }',
+      '- { action: "activity/action", activityAction: "verb", parameter: "subject", result: "text" }',
+      '- { action: "activity/response", body: "text" } — ONLY when completely done, ends session',
+      '- { action: "session/plan", plan: [{ content: "step", status: "inProgress" }] }',
+      '- { action: "query/issue" }',
+    );
+  }
+  return sections.join("\n");
 }
 
 
@@ -507,41 +529,124 @@ async function handleAgentEvent(
         if (!planText || planText.length < 50) {
           agentError = "Planning phase produced no useful output";
         } else {
-          // Phase 2: EXEC — execute the plan with fresh context
+          // Phase 2: EXEC — execute the plan
+          //
+          // Prefer subagent.run() with lightContext: true over callGateway.
+          // The full enriched message (API docs + plan) fed to callGateway
+          // triggers a Codex "blocked_tool_call" stall in the embedded run.
+          // Subagent.run() with lightContext skips heavy bootstrap context,
+          // giving the agent a smaller initial context that doesn't stall.
+          //
           const execSessionKey = `${sessionKey}:exec`;
-          api.logger.info?.(`linear [phase=exec]: dispatching, sessionKey=${execSessionKey}`);
           postActivity(api, cfg, session, {
             type: "thought",
             body: "Implementing the plan…",
           }, { ephemeral: true }).catch(() => {});
 
-          // Build a fresh enriched message for the exec phase with the plan
-          // getBaseUrl was already imported above
-          const execApiBaseUrl = cfg.apiBaseUrl || (await import("../api/base-url.js")).getBaseUrl();
-          const execMessage = enableApi && apiToken
-            ? buildEnrichedMessage({
-                action: "created",
-                id, title, url, desc, guidance,
-                prompt: "",
-                repo, session, context,
-                compact: false,
-                apiBaseUrl: execApiBaseUrl, apiToken, issueId, teamId, repoDir: repo,
-              }) + "\n\n---\n" + buildExecPhaseMessage(planText)
-            : buildExecPhaseMessage(planText);
+          // Diagnostic: log subagent availability
+          const subagentAvailable = api.subagent && typeof api.subagent.run === "function";
+          api.logger.info?.(`linear [phase=exec]: subagent available=${subagentAvailable}, type=${typeof api.subagent}`);
+          if (subagentAvailable) {
+            // ── Subagent path: lightweight context, avoids blocked_tool_call stall ──
+            api.logger.info?.(`linear [phase=exec]: dispatching via subagent, sessionKey=${execSessionKey}`);
+            const execMessage = buildExecPhaseMessage(planText, true);
 
-          const execResult = await call({
-            method: "agent",
-            params: {
-              message: execMessage,
-              sessionKey: execSessionKey,
-              label: `${label} [exec]`,
-              idempotencyKey: `${idem}-exec`,
-            },
-            expectFinal: true,
-            timeoutMs: AGENT_TIMEOUT_MS,
-          });
-          agentText = buildAgentResponse(execResult);
-          api.logger.info?.(`linear [phase=exec]: completed, textLen=${agentText?.length ?? 0}`);
+            try {
+              const { runId } = await api.subagent!.run({
+                sessionKey: execSessionKey,
+                message: execMessage,
+                idempotencyKey: `${idem}-exec`,
+                deliver: false,
+                lane: "subagent",
+                lightContext: true,
+              });
+              api.logger.info?.(`linear [phase=exec]: subagent dispatched, runId=${runId}`);
+
+              const waitResult = await api.subagent!.waitForRun({
+                runId,
+                timeoutMs: AGENT_TIMEOUT_MS,
+              });
+
+              if (waitResult.status === "ok") {
+                const sessionMessages = await api.subagent!.getSessionMessages({
+                  sessionKey: execSessionKey,
+                  limit: 5,
+                });
+                const lastAssistant = [...(sessionMessages.messages || [])]
+                  .reverse()
+                  .find((m: Record<string, unknown>) => m.role === "assistant");
+                agentText = typeof lastAssistant?.content === "string"
+                  ? lastAssistant.content
+                  : typeof lastAssistant?.content === "object" && lastAssistant?.content !== null
+                    ? (Array.isArray(lastAssistant.content)
+                      ? (lastAssistant.content as Array<Record<string, unknown>>).filter((p) => p.type === "text").map((p) => p.text ?? "").join("")
+                      : String(lastAssistant.content))
+                    : undefined;
+                api.logger.info?.(`linear [phase=exec]: subagent completed, textLen=${agentText?.length ?? 0}`);
+              } else if (waitResult.status === "timeout") {
+                agentError = "Execution phase timed out";
+                api.logger.warn?.(`linear [phase=exec]: subagent timed out, runId=${runId}`);
+              } else {
+                agentError = waitResult.error || "Execution phase failed";
+                api.logger.warn?.(`linear [phase=exec]: subagent error: ${agentError}, runId=${runId}`);
+              }
+            } catch (subagentErr) {
+              // Subagent unavailable or failed — fall back to callGateway
+              const errMsg = subagentErr instanceof Error ? subagentErr.message : String(subagentErr);
+              api.logger.warn?.(`linear [phase=exec]: subagent failed (${errMsg}), falling back to callGateway`);
+              const execApiBaseUrl = cfg.apiBaseUrl || (await import("../api/base-url.js")).getBaseUrl();
+              const fallbackMessage = enableApi && apiToken
+                ? buildEnrichedMessage({
+                    action: "created",
+                    id, title, url, desc, guidance,
+                    prompt: "",
+                    repo, session, context,
+                    compact: false,
+                    apiBaseUrl: execApiBaseUrl, apiToken, issueId, teamId, repoDir: repo,
+                  }) + "\n\n---\n" + buildExecPhaseMessage(planText, false)
+                : buildExecPhaseMessage(planText, false);
+              const execResult = await call({
+                method: "agent",
+                params: {
+                  message: fallbackMessage,
+                  sessionKey: execSessionKey,
+                  label: `${label} [exec]`,
+                  idempotencyKey: `${idem}-exec`,
+                },
+                expectFinal: true,
+                timeoutMs: AGENT_TIMEOUT_MS,
+              });
+              agentText = buildAgentResponse(execResult);
+              api.logger.info?.(`linear [phase=exec]: callGateway fallback completed, textLen=${agentText?.length ?? 0}`);
+            }
+          } else {
+            // ── Legacy path: callGateway with full context (may stall) ──
+            api.logger.info?.(`linear [phase=exec]: subagent unavailable, using callGateway`);
+            const execApiBaseUrl = cfg.apiBaseUrl || (await import("../api/base-url.js")).getBaseUrl();
+            const legacyMessage = enableApi && apiToken
+              ? buildEnrichedMessage({
+                  action: "created",
+                  id, title, url, desc, guidance,
+                  prompt: "",
+                  repo, session, context,
+                  compact: false,
+                  apiBaseUrl: execApiBaseUrl, apiToken, issueId, teamId, repoDir: repo,
+                }) + "\n\n---\n" + buildExecPhaseMessage(planText, false)
+              : buildExecPhaseMessage(planText, false);
+            const execResult = await call({
+              method: "agent",
+              params: {
+                message: legacyMessage,
+                sessionKey: execSessionKey,
+                label: `${label} [exec]`,
+                idempotencyKey: `${idem}-exec`,
+              },
+              expectFinal: true,
+              timeoutMs: AGENT_TIMEOUT_MS,
+            });
+            agentText = buildAgentResponse(execResult);
+            api.logger.info?.(`linear [phase=exec]: callGateway completed, textLen=${agentText?.length ?? 0}`);
+          }
           // Clear response flag — the exec agent may have posted activity/response,
           // but the handler should still post the final response after all phases complete.
           if (session) clearResponseFlag(session);

@@ -1,5 +1,48 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 
+export interface SubagentRunParams {
+  sessionKey: string;
+  message: string;
+  idempotencyKey?: string;
+  deliver?: boolean;
+  lane?: string;
+  lightContext?: boolean;
+  extraSystemPrompt?: string;
+  model?: string;
+  provider?: string;
+}
+
+export interface SubagentRunResult {
+  runId: string;
+}
+
+export interface SubagentWaitParams {
+  runId: string;
+  timeoutMs?: number;
+}
+
+export interface SubagentWaitResult {
+  status: "ok" | "error" | "timeout";
+  error?: string;
+}
+
+export interface SubagentMessagesParams {
+  sessionKey: string;
+  limit?: number;
+}
+
+export interface SubagentMessagesResult {
+  messages: Array<Record<string, unknown>>;
+}
+
+export interface OpenClawSubagentApi {
+  run: (params: SubagentRunParams) => Promise<SubagentRunResult>;
+  waitForRun: (params: SubagentWaitParams) => Promise<SubagentWaitResult>;
+  getSessionMessages: (params: SubagentMessagesParams) => Promise<SubagentMessagesResult>;
+  getSession: (params: SubagentMessagesParams) => Promise<SubagentMessagesResult>;
+  deleteSession: (params: { sessionKey: string }) => Promise<void>;
+}
+
 export interface OpenClawPluginApi {
   pluginConfig?: Record<string, unknown>;
   config?: { gateway?: { auth?: { token?: string; password?: string } } };
@@ -10,6 +53,7 @@ export interface OpenClawPluginApi {
     debug?: (msg: string) => void;
   };
   callGateway?: unknown;
+  subagent?: OpenClawSubagentApi;
   runtime?: Record<string, unknown>;
   registerHttpRoute: (opts: {
     path: string;
