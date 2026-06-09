@@ -1,8 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
-import fs from "node:fs";
-import path from "node:path";
-import { pathToFileURL } from "node:url";
+
 import type {
   OpenClawPluginApi,
   PluginConfig,
@@ -41,7 +39,6 @@ import {
   resolveRepo,
   resolveExternal,
 } from "./message-builder.js";
-import { buildAgentResponse } from "./response-parser.js";
 import { applyIssuePolicy, resolveReviewState, resolveIssueInfo, updateIssue } from "./issue-policy.js";
 import { isCloseIntentPrompt, closeIssueFromPrompt } from "./close-intent.js";
 import { resolveRepoWithOrg } from "./repo-resolver.js";
@@ -67,7 +64,6 @@ import {
 } from "./active-runs.js";
 import { resolveDelegateUnassignment } from "./issue-events.js";
 
-const callRef: { value?: (opts: Record<string, unknown>) => Promise<unknown> } = {};
 
 async function autoCloseIssue(
   api: OpenClawPluginApi,
@@ -730,11 +726,10 @@ async function handleAgentEvent(
     let agentText: string | undefined;
     let agentError: string | undefined;
 
-    // ── Primary: callGateway with expectFinal ──
+    // ── Dispatch via subagent API ──
     //
-    // Uses callGateway to dispatch the agent and wait for the result.
-    // The webhook already returned 202 via queueMicrotask so we don't
-    // block HTTP.
+    // Uses the plugin SDK's subagent API to dispatch agent runs and wait
+    // for results. This is the public, stable interface for plugins.
     //
     // For "created" actions, uses multi-phase dispatch:
     //   Phase 1 (PLAN): Agent investigates and produces a plan.
@@ -742,6 +737,10 @@ async function handleAgentEvent(
     // Each phase gets its own sessionKey so the gateway creates
     // a fresh agent session with clean context.
     //
+    const subagentAvailable = api.subagent && typeof api.subagent.run === "function";
+    if (!subagentAvailable) {
+      throw new Error("subagent API not available — ensure the plugin is running inside an OpenClaw gateway process");
+    }
     const useMultiPhase = shouldUseMultiPhase(action, prompt);
 
     // Keepalive: post ephemeral thoughts to Linear so the session
@@ -763,8 +762,6 @@ async function handleAgentEvent(
     }
 
     try {
-      const call = await loadCallGateway(api);
-
       if (currentRunCanceled()) {
         api.logger.info?.(`${prefix}linear: run canceled before agent dispatch, session=${session ? session.slice(0, 8) + "..." : "(none)"}`);
       } else if (useMultiPhase) {
@@ -773,24 +770,28 @@ async function handleAgentEvent(
         // Phase 1: PLAN — investigate and produce a plan
         const planSessionKey = `${sessionKey}:plan`;
         if (issueId && session) addActiveRunSessionKey(issueId, session, planSessionKey);
-        api.logger.info?.(`${prefix}linear [phase=plan]: dispatching, sessionKey=${planSessionKey}`);
+        api.logger.info?.(`${prefix}linear [phase=plan]: dispatching via subagent, sessionKey=${planSessionKey}`);
         postActivityFireAndForget(api, cfg, trace, session, {
           type: "thought",
           body: "Investigating issue and planning implementation…",
         }, { ephemeral: true });
 
-        const planResult = await call({
-          method: "agent",
-          params: {
-            message: message + PHASE_PLAN_PROMPT_SUFFIX,
-            sessionKey: planSessionKey,
-            label: `${label} [plan]`,
-            idempotencyKey: `${idem}-plan`,
-          },
-          expectFinal: true,
+        const { runId: planRunId } = await api.subagent!.run({
+          sessionKey: planSessionKey,
+          message: message + PHASE_PLAN_PROMPT_SUFFIX,
+          idempotencyKey: `${idem}-plan`,
+          deliver: false,
+        });
+        const planWaitResult = await api.subagent!.waitForRun({
+          runId: planRunId,
           timeoutMs: PHASE_TIMEOUT_MS,
         });
-        const planText = buildAgentResponse(planResult);
+        let planText: string | undefined;
+        if (planWaitResult.status === "ok") {
+          planText = await extractLastAssistantText(api, planSessionKey);
+        } else {
+          agentError = planWaitResult.error || "Planning phase failed";
+        }
         api.logger.info?.(`${prefix}linear [phase=plan]: completed, textLen=${planText?.length ?? 0}`);
         // Intermediate phases may have posted activity/response despite instructions
         // not to — clear the flag so the final response from the handler is posted.
@@ -799,15 +800,12 @@ async function handleAgentEvent(
         if (currentRunCanceled()) {
           api.logger.info?.(`${prefix}linear [phase=plan]: run canceled after planning, skipping execution phase`);
         } else if (!planText || planText.length < 50) {
-          agentError = "Planning phase produced no useful output";
+          agentError = agentError || "Planning phase produced no useful output";
         } else {
           // Phase 2: EXEC — execute the plan
           //
-          // Prefer subagent.run() with lightContext: true over callGateway.
-          // The full enriched message (API docs + plan) fed to callGateway
-          // triggers a Codex "blocked_tool_call" stall in the embedded run.
-          // Subagent.run() with lightContext skips heavy bootstrap context,
-          // giving the agent a smaller initial context that doesn't stall.
+          // Uses lightContext: true to avoid the Codex "blocked_tool_call" stall
+          // that happens with heavy bootstrap context.
           //
           const execSessionKey = `${sessionKey}:exec`;
           if (issueId && session) addActiveRunSessionKey(issueId, session, execSessionKey);
@@ -816,122 +814,50 @@ async function handleAgentEvent(
             body: "Implementing the plan…",
           }, { ephemeral: true });
 
-          // Diagnostic: log subagent availability
-          const subagentAvailable = api.subagent && typeof api.subagent.run === "function";
-          api.logger.info?.(`${prefix}linear [phase=exec]: subagent available=${subagentAvailable}, type=${typeof api.subagent}`);
-          if (subagentAvailable) {
-            // ── Subagent path: lightweight context, avoids blocked_tool_call stall ──
-            api.logger.info?.(`${prefix}linear [phase=exec]: dispatching via subagent, sessionKey=${execSessionKey}`);
-            const subagentApiBaseUrl = cfg.apiBaseUrl || (await import("../api/base-url.js")).getBaseUrl();
-            const execMessage = buildExecPhaseMessage(
-              planText,
-              true,
-              enableApi && apiToken
-                ? { apiToken, apiBaseUrl: subagentApiBaseUrl }
-                : undefined,
-            );
+          const subagentApiBaseUrl = cfg.apiBaseUrl || (await import("../api/base-url.js")).getBaseUrl();
+          const execMessage = buildExecPhaseMessage(
+            planText,
+            true,
+            enableApi && apiToken
+              ? { apiToken, apiBaseUrl: subagentApiBaseUrl }
+              : undefined,
+          );
 
-            try {
-              const { runId } = await api.subagent!.run({
-                sessionKey: execSessionKey,
-                message: execMessage,
-                idempotencyKey: `${idem}-exec`,
-                deliver: false,
-                lane: "subagent",
-                lightContext: true,
-              });
-              api.logger.info?.(`${prefix}linear [phase=exec]: subagent dispatched, runId=${runId}`);
+          try {
+            const { runId: execRunId } = await api.subagent!.run({
+              sessionKey: execSessionKey,
+              message: execMessage,
+              idempotencyKey: `${idem}-exec`,
+              deliver: false,
+              lane: "subagent",
+              lightContext: true,
+            });
+            api.logger.info?.(`${prefix}linear [phase=exec]: subagent dispatched, runId=${execRunId}`);
 
-              const waitResult = await api.subagent!.waitForRun({
-                runId,
-                timeoutMs: AGENT_TIMEOUT_MS,
-              });
-
-              if (currentRunCanceled()) {
-                api.logger.info?.(`${prefix}linear [phase=exec]: run canceled while waiting for subagent, skipping result collection`);
-              } else if (waitResult.status === "ok") {
-                const sessionMessages = await api.subagent!.getSessionMessages({
-                  sessionKey: execSessionKey,
-                  limit: 5,
-                });
-                const lastAssistant = [...(sessionMessages.messages || [])]
-                  .reverse()
-                  .find((m: Record<string, unknown>) => m.role === "assistant");
-                agentText = typeof lastAssistant?.content === "string"
-                  ? lastAssistant.content
-                  : typeof lastAssistant?.content === "object" && lastAssistant?.content !== null
-                    ? (Array.isArray(lastAssistant.content)
-                      ? (lastAssistant.content as Array<Record<string, unknown>>).filter((p) => p.type === "text").map((p) => p.text ?? "").join("")
-                      : String(lastAssistant.content))
-                    : undefined;
-                api.logger.info?.(`${prefix}linear [phase=exec]: subagent completed, textLen=${agentText?.length ?? 0}`);
-              } else if (waitResult.status === "timeout") {
-                agentError = "Execution phase timed out";
-                api.logger.warn?.(`${prefix}linear [phase=exec]: subagent timed out, runId=${runId}`);
-              } else {
-                agentError = waitResult.error || "Execution phase failed";
-                api.logger.warn?.(`${prefix}linear [phase=exec]: subagent error: ${agentError}, runId=${runId}`);
-              }
-            } catch (subagentErr) {
-              if (currentRunCanceled()) {
-                api.logger.info?.(`${prefix}linear [phase=exec]: run canceled during subagent execution, skipping fallback`);
-              } else {
-                // Subagent unavailable or failed — fall back to callGateway
-                const errMsg = formatError(subagentErr);
-                api.logger.warn?.(`${prefix}linear [phase=exec]: subagent failed (${errMsg}), falling back to callGateway`);
-                const execApiBaseUrl = cfg.apiBaseUrl || (await import("../api/base-url.js")).getBaseUrl();
-                const fallbackMessage = enableApi && apiToken
-                  ? buildEnrichedMessage({
-                      action: "created",
-                      id, title, url, desc, guidance,
-                      prompt: "",
-                      repo, session, context,
-                      compact: false,
-                      apiBaseUrl: execApiBaseUrl, apiToken, issueId, teamId, repoDir: repo,
-                    }) + "\n\n---\n" + buildExecPhaseMessage(planText, false)
-                  : buildExecPhaseMessage(planText, false);
-                const execResult = await call({
-                  method: "agent",
-                  params: {
-                    message: fallbackMessage,
-                    sessionKey: execSessionKey,
-                    label: `${label} [exec]`,
-                    idempotencyKey: `${idem}-exec`,
-                  },
-                  expectFinal: true,
-                  timeoutMs: AGENT_TIMEOUT_MS,
-                });
-                agentText = buildAgentResponse(execResult);
-                api.logger.info?.(`${prefix}linear [phase=exec]: callGateway fallback completed, textLen=${agentText?.length ?? 0}`);
-              }
-            }
-          } else {
-            // ── Legacy path: callGateway with full context (may stall) ──
-            api.logger.info?.(`${prefix}linear [phase=exec]: subagent unavailable, using callGateway`);
-            const execApiBaseUrl = cfg.apiBaseUrl || (await import("../api/base-url.js")).getBaseUrl();
-            const legacyMessage = enableApi && apiToken
-              ? buildEnrichedMessage({
-                  action: "created",
-                  id, title, url, desc, guidance,
-                  prompt: "",
-                  repo, session, context,
-                  compact: false,
-                  apiBaseUrl: execApiBaseUrl, apiToken, issueId, teamId, repoDir: repo,
-                }) + "\n\n---\n" + buildExecPhaseMessage(planText, false)
-              : buildExecPhaseMessage(planText, false);
-            const execResult = await call({
-              method: "agent",
-              params: {
-                message: legacyMessage,
-                sessionKey: execSessionKey,
-                label: `${label} [exec]`,
-                idempotencyKey: `${idem}-exec`,
-              },
-              expectFinal: true,
+            const waitResult = await api.subagent!.waitForRun({
+              runId: execRunId,
               timeoutMs: AGENT_TIMEOUT_MS,
             });
-            agentText = buildAgentResponse(execResult);
-            api.logger.info?.(`${prefix}linear [phase=exec]: callGateway completed, textLen=${agentText?.length ?? 0}`);
+
+            if (currentRunCanceled()) {
+              api.logger.info?.(`${prefix}linear [phase=exec]: run canceled while waiting for subagent, skipping result collection`);
+            } else if (waitResult.status === "ok") {
+              agentText = await extractLastAssistantText(api, execSessionKey);
+              api.logger.info?.(`${prefix}linear [phase=exec]: subagent completed, textLen=${agentText?.length ?? 0}`);
+            } else if (waitResult.status === "timeout") {
+              agentError = "Execution phase timed out";
+              api.logger.warn?.(`${prefix}linear [phase=exec]: subagent timed out, runId=${execRunId}`);
+            } else {
+              agentError = waitResult.error || "Execution phase failed";
+              api.logger.warn?.(`${prefix}linear [phase=exec]: subagent error: ${agentError}, runId=${execRunId}`);
+            }
+          } catch (subagentErr) {
+            if (currentRunCanceled()) {
+              api.logger.info?.(`${prefix}linear [phase=exec]: run canceled during subagent execution`);
+            } else {
+              agentError = formatError(subagentErr);
+              api.logger.warn?.(`${prefix}linear [phase=exec]: subagent failed (${agentError})`);
+            }
           }
           // Clear response flag — the exec agent may have posted activity/response,
           // but the handler should still post the final response after all phases complete.
@@ -939,24 +865,27 @@ async function handleAgentEvent(
         }
       } else {
         // ── Single-phase dispatch (for prompted/follow-ups) ──
-        api.logger.info?.(`${prefix}linear: dispatching via callGateway, sessionKey=${sessionKey}`);
-        const agentResult = await call({
-          method: "agent",
-          params: {
-            message,
-            sessionKey,
-            label,
-            idempotencyKey: idem,
-          },
-          expectFinal: true,
+        api.logger.info?.(`${prefix}linear: dispatching via subagent, sessionKey=${sessionKey}`);
+        const { runId: singleRunId } = await api.subagent!.run({
+          sessionKey,
+          message,
+          idempotencyKey: idem,
+          deliver: false,
+        });
+        const singleWaitResult = await api.subagent!.waitForRun({
+          runId: singleRunId,
           timeoutMs: AGENT_TIMEOUT_MS,
         });
-        agentText = buildAgentResponse(agentResult);
-        api.logger.info?.(`${prefix}linear: callGateway completed, sessionKey=${sessionKey}, textLen=${agentText?.length ?? 0}`);
+        if (singleWaitResult.status === "ok") {
+          agentText = await extractLastAssistantText(api, sessionKey);
+        } else {
+          agentError = singleWaitResult.error || "Agent run failed";
+        }
+        api.logger.info?.(`${prefix}linear: subagent completed, sessionKey=${sessionKey}, textLen=${agentText?.length ?? 0}`);
       }
     } catch (dispatchErr) {
       const dispatchMsg = formatError(dispatchErr);
-      api.logger.warn?.(`${prefix}linear: callGateway dispatch failed (${dispatchMsg})`);
+      api.logger.warn?.(`${prefix}linear: subagent dispatch failed (${dispatchMsg})`);
       agentError = dispatchMsg;
     } finally {
       keepaliveAlive = false;
@@ -1122,6 +1051,27 @@ function normalizePayload(
   return out;
 }
 
+/** Extract the last assistant message text from a subagent session. */
+async function extractLastAssistantText(
+  api: OpenClawPluginApi,
+  sessionKey: string,
+): Promise<string | undefined> {
+  const sessionMessages = await api.subagent!.getSessionMessages({
+    sessionKey,
+    limit: 5,
+  });
+  const lastAssistant = [...(sessionMessages.messages || [])]
+    .reverse()
+    .find((m: Record<string, unknown>) => m.role === "assistant");
+  return typeof lastAssistant?.content === "string"
+    ? lastAssistant.content
+    : typeof lastAssistant?.content === "object" && lastAssistant?.content !== null
+      ? (Array.isArray(lastAssistant.content)
+        ? (lastAssistant.content as Array<Record<string, unknown>>).filter((p) => p.type === "text").map((p) => p.text ?? "").join("")
+        : String(lastAssistant.content))
+      : undefined;
+}
+
 function logEvent(
   api: OpenClawPluginApi,
   label: string,
@@ -1212,82 +1162,3 @@ export async function dispatchToAgentRuntime(
   return capturedReply ?? { ok: true };
 }
 
-async function loadCallGateway(
-  api: OpenClawPluginApi,
-): Promise<(opts: Record<string, unknown>) => Promise<unknown>> {
-  if (callRef.value) return callRef.value;
-  if (api.callGateway && typeof api.callGateway === "function") {
-    callRef.value = api.callGateway as (opts: Record<string, unknown>) => Promise<unknown>;
-    return callRef.value;
-  }
-  try {
-    const argv1 =
-      typeof process?.argv?.[1] === "string" ? process.argv[1] : "";
-    let distDir = argv1 ? path.dirname(argv1) : "";
-    // argv1 is openclaw.mjs, distDir is the openclaw package root.
-    // The call-*.js files are in the dist/ subdirectory.
-    if (distDir && !fs.existsSync(path.join(distDir, "call-*.js"))) {
-      const distSub = path.join(distDir, "dist");
-      if (fs.existsSync(distSub)) distDir = distSub;
-    }
-    api.logger.info?.(`linear: loadCallGateway distDir=${distDir}`);
-    if (distDir && fs.existsSync(distDir)) {
-      const files = fs
-        .readdirSync(distDir)
-        .filter(
-          (name) => name.startsWith("call-") && name.endsWith(".js"),
-        )
-        // Prefer call-D* over call--* because call--* imports entry.js
-        // which has a module-level side effect that calls runCli(), causing
-        // a second gateway start and a GatewayLockError crash.
-        .sort((a, b) =>
-          a.startsWith("call--") === b.startsWith("call--")
-            ? 0
-            : a.startsWith("call--")
-              ? 1
-              : -1,
-        );
-      for (const file of files) {
-        try {
-          const mod = await import(
-            pathToFileURL(path.join(distDir, file)).href
-          );
-          const fn =
-            (mod?.n as ((...args: unknown[]) => unknown) | undefined) ??
-            (mod?.callGateway as ((...args: unknown[]) => unknown) | undefined);
-          if (typeof fn === "function") {
-            const auth = api.config?.gateway?.auth ?? {};
-            const token =
-              typeof auth.token === "string"
-                ? auth.token.trim()
-                : undefined;
-            const password =
-              typeof auth.password === "string"
-                ? auth.password.trim()
-                : undefined;
-            const call = (opts: Record<string, unknown>) =>
-              fn({
-                ...opts,
-                token: (opts?.token as string | undefined) ?? token,
-                password:
-                  (opts?.password as string | undefined) ?? password,
-              });
-            callRef.value = call as (opts: Record<string, unknown>) => Promise<unknown>;
-            return callRef.value;
-          }
-        } catch (err) {
-          api.logger?.debug?.(
-            `linear: callGateway import failed (${file}): ${err instanceof Error ? err.message : String(err)}`,
-          );
-        }
-      }
-    }
-  } catch (err) {
-    api.logger?.warn?.(
-      `linear: failed to locate gateway callGateway: ${err instanceof Error ? err.message : String(err)}`,
-    );
-  }
-  throw new Error(
-    "callGateway not available. Ensure the plugin is running inside an OpenClaw gateway process.",
-  );
-}

@@ -45,14 +45,13 @@ export interface OpenClawSubagentApi {
 
 export interface OpenClawPluginApi {
   pluginConfig?: Record<string, unknown>;
-  config?: { gateway?: { auth?: { token?: string; password?: string } } };
+  config?: Record<string, unknown>;
   logger: {
     info?: (msg: string) => void;
     warn?: (msg: string) => void;
     error?: (msg: string) => void;
     debug?: (msg: string) => void;
   };
-  callGateway?: unknown;
   subagent?: OpenClawSubagentApi;
   runtime?: Record<string, unknown>;
   registerHttpRoute: (opts: {
