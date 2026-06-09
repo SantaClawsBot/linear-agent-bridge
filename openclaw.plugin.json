@@ -142,6 +142,14 @@
       "githubOrg": {
         "type": "string",
         "description": "GitHub organization name. If set, repos are auto-fetched and used with Linear's issueRepositorySuggestions to resolve the working directory for each issue."
+      },
+      "githubRepoFilter": {
+        "type": "string",
+        "description": "Optional substring filter for repo names. Only repos whose name contains this string are sent to the suggestion API. If no repos match, all active repos are used as fallback."
+      },
+      "githubRepoMaxAgeDays": {
+        "type": "number",
+        "description": "Maximum age in days since last push for repos to include as candidates. Archived repos and repos with no pushes are always excluded. (default: 365)"
       }
     }
   },
@@ -216,6 +224,16 @@
       "label": "GitHub org",
       "description": "GitHub organization name for auto-resolving issue → repo mapping via Linear suggestions",
       "placeholder": "my-org"
+    },
+    "githubRepoFilter": {
+      "label": "Repo name filter",
+      "description": "Substring filter — only repos whose name contains this string are candidates. Fallback to all if none match.",
+      "placeholder": "app"
+    },
+    "githubRepoMaxAgeDays": {
+      "label": "Max repo age (days)",
+      "description": "Exclude repos not pushed to within this many days (default: 365)",
+      "placeholder": "365"
     }
   }
 }

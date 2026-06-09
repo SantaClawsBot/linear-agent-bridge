@@ -220,6 +220,8 @@ Authentication requires **one** of these modes:
 | `closeOnComplete` | `boolean` | `true` | Auto-close issue to "completed" when agent finishes successfully on a `created` action |
 | `maxConcurrent` | `number` | `3` | Maximum simultaneous agent runs. Excess runs are queued. Capped at 20. |
 | `githubOrg` | `string` | — | GitHub organization name. If set, repos are auto-fetched and matched to issues via Linear's `issueRepositorySuggestions`. Clones repos on demand into `~/.openclaw/repos/<org>/<repo>`. Falls back to `defaultDir` or `repoByTeam`/`repoByProject` if no match above 50% confidence. |
+| `githubRepoFilter` | `string` | — | Substring filter for repo names — only matching repos are sent as candidates (falls back to all if none match). Useful for large orgs to narrow the scope. |
+| `githubRepoMaxAgeDays` | `number` | `365` | Max age in days since last push. Archived repos and repos with no pushes are always excluded. |
 
 ### Notifications
 

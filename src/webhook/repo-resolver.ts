@@ -16,37 +16,51 @@ interface OrgRepo {
   hostname: string;
   fullName: string;
   cloneUrl: string;
+  archived: boolean;
+  pushedAt: string;
   /** Local directory if already cloned */
   dir?: string;
 }
+
+/** Default max age for repos to include (days since last push). */
+const DEFAULT_MAX_AGE_DAYS = 365;
+/** Max candidates to send to Linear's suggestion API. */
+const MAX_CANDIDATES = 50;
+/** Minimum confidence threshold to accept a suggestion. */
+const MIN_CONFIDENCE = 0.5;
+/** Cache TTL for org repo list. */
+const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
 interface CachedOrgRepos {
   repos: OrgRepo[];
   fetchedAt: number;
 }
 
-const MIN_CONFIDENCE = 0.5;
-const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
-
 let cache: CachedOrgRepos | null = null;
 
 function reposCacheDir(): string {
-  // Default to a repos directory next to the workspace
   return join(process.env.HOME ?? "/tmp", ".openclaw/repos");
 }
 
 /**
- * Fetch all repos from a GitHub org via `gh api`.
- * Returns an array of { hostname, fullName, cloneUrl }.
+ * Fetch repos from a GitHub org via `gh api`, filtering out:
+ * - Archived repos
+ * - Repos with no pushes (empty templates)
+ * - Repos not pushed to within maxAgeDays
+ *
+ * Returns repos sorted by most recent push (newest first).
  */
-async function fetchOrgRepos(org: string): Promise<OrgRepo[]> {
+async function fetchOrgRepos(org: string, maxAgeDays: number): Promise<OrgRepo[]> {
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - maxAgeDays);
+  const cutoffIso = cutoff.toISOString();
+
   const { stdout } = await execFile("gh", [
     "api",
     `orgs/${org}/repos`,
     "--paginate",
     "--jq",
-    // eslint-disable-next-line no-template-curly-in-string
-    '.[] | { hostname: "github.com", fullName: .full_name, cloneUrl: .clone_url }',
+    '.[] | { hostname: "github.com", fullName: .full_name, cloneUrl: .clone_url, archived: .archived, pushedAt: .pushed_at }',
   ], {
     timeout: 30_000,
     env: { ...process.env },
@@ -57,6 +71,8 @@ async function fetchOrgRepos(org: string): Promise<OrgRepo[]> {
   for (const line of lines) {
     try {
       const parsed = JSON.parse(line) as OrgRepo;
+      if (parsed.archived || !parsed.pushedAt) continue;
+      if (parsed.pushedAt < cutoffIso) continue;
       if (parsed.hostname && parsed.fullName) {
         repos.push(parsed);
       }
@@ -64,6 +80,9 @@ async function fetchOrgRepos(org: string): Promise<OrgRepo[]> {
       // skip malformed lines
     }
   }
+
+  // Sort by most recently pushed
+  repos.sort((a, b) => b.pushedAt.localeCompare(a.pushedAt));
   return repos;
 }
 
@@ -71,11 +90,11 @@ async function fetchOrgRepos(org: string): Promise<OrgRepo[]> {
  * Get the list of repos for the configured GitHub org.
  * Results are cached for CACHE_TTL_MS.
  */
-async function getOrgRepos(org: string): Promise<OrgRepo[]> {
+async function getOrgRepos(org: string, maxAgeDays: number): Promise<OrgRepo[]> {
   if (cache && cache.repos.length > 0 && Date.now() - cache.fetchedAt < CACHE_TTL_MS) {
     return cache.repos;
   }
-  const repos = await fetchOrgRepos(org);
+  const repos = await fetchOrgRepos(org, maxAgeDays);
   cache = { repos, fetchedAt: Date.now() };
   return repos;
 }
@@ -99,7 +118,7 @@ async function suggestRepo(
     variables: {
       issueId,
       agentSessionId: sessionId,
-      candidateRepositories: candidates.map((r) => ({
+      candidateRepositories: candidates.slice(0, MAX_CANDIDATES).map((r) => ({
         hostname: r.hostname,
         repositoryFullName: r.fullName,
       })),
@@ -127,20 +146,14 @@ async function suggestRepo(
 
 /**
  * Ensure a repo is cloned locally. Returns the directory path.
- * If already cloned (via dir), returns that. Otherwise clones into
- * the repos cache directory.
  */
 function ensureCloned(repo: OrgRepo, baseDir: string): string {
   if (repo.dir && existsSync(repo.dir)) {
     return repo.dir;
   }
-  // Derive a local path: ~/.openclaw/repos/<org>/<repo-name>
   const parts = repo.fullName.split("/");
   const dir = join(baseDir, parts[0], parts[1]);
-  if (existsSync(dir)) {
-    return dir;
-  }
-  return dir; // caller should clone; we return the target dir
+  return dir;
 }
 
 /**
@@ -157,7 +170,6 @@ export async function resolveRepoWithOrg(
   team: string,
   proj: string,
 ): Promise<{ dir: string; suggested: boolean; repoName?: string }> {
-  // If no githubOrg configured, return the static mapping
   if (!cfg.githubOrg) {
     return { dir: staticRepo, suggested: false };
   }
@@ -167,10 +179,14 @@ export async function resolveRepoWithOrg(
     return { dir: staticRepo, suggested: false };
   }
 
-  // Fetch org repos
+  const maxAgeDays = typeof cfg.githubRepoMaxAgeDays === "number" && cfg.githubRepoMaxAgeDays > 0
+    ? cfg.githubRepoMaxAgeDays
+    : DEFAULT_MAX_AGE_DAYS;
+
+  // Fetch org repos (filtered)
   let repos: OrgRepo[];
   try {
-    repos = await getOrgRepos(cfg.githubOrg);
+    repos = await getOrgRepos(cfg.githubOrg, maxAgeDays);
   } catch (err) {
     api.logger.warn?.(
       `linear: failed to fetch org repos for ${cfg.githubOrg}: ${err instanceof Error ? err.message : String(err)}`,
@@ -179,15 +195,34 @@ export async function resolveRepoWithOrg(
   }
 
   if (repos.length === 0) {
+    api.logger.info?.(`linear: no active repos found for org ${cfg.githubOrg} (max age: ${maxAgeDays}d)`);
     return { dir: staticRepo, suggested: false };
   }
+
+  // Apply optional name pattern filter
+  let candidates = repos;
+  if (cfg.githubRepoFilter) {
+    const pattern = cfg.githubRepoFilter;
+    candidates = repos.filter((r) => {
+      const name = r.fullName.split("/")[1] ?? r.fullName;
+      return name.includes(pattern);
+    });
+    if (candidates.length === 0) {
+      api.logger.info?.(`linear: githubRepoFilter "${pattern}" matched zero repos, falling back`);
+      candidates = repos;
+    }
+  }
+
+  api.logger.info?.(
+    `linear: ${candidates.length} candidate repos for ${cfg.githubOrg} (of ${repos.length} total)`,
+  );
 
   // Ask Linear for suggestions
   if (!issueId || !sessionId) {
     return { dir: staticRepo, suggested: false };
   }
 
-  const match = await suggestRepo(api, cfg, issueId, sessionId, repos);
+  const match = await suggestRepo(api, cfg, issueId, sessionId, candidates);
   if (!match) {
     api.logger.info?.(
       `linear: no repo suggestion above ${MIN_CONFIDENCE * 100}% confidence for issue ${issueId.slice(0, 8)}...`,
@@ -205,12 +240,12 @@ export async function resolveRepoWithOrg(
   // Auto-clone if the directory doesn't exist yet
   if (!existsSync(dir)) {
     try {
-      mkdirSync(dir, { recursive: true });
+      mkdirSync(join(dir, ".."), { recursive: true });
       const { execFile: ef } = await import("node:child_process");
       const { promisify: p } = await import("node:util");
       const pe = p(ef);
       await pe("git", ["clone", "--depth", "1", match.cloneUrl, dir], {
-        timeout: 60_000,
+        timeout: 120_000,
       });
       api.logger.info?.(`linear: cloned ${match.fullName} to ${dir}`);
     } catch (err) {

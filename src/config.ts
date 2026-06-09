@@ -31,6 +31,8 @@ export function normalizeCfg(
     closeOnComplete: readCfgBool(cfg, "closeOnComplete"),
     maxConcurrent: readCfgNumber(cfg, "maxConcurrent"),
     githubOrg: readCfgString(cfg, "githubOrg"),
+    githubRepoFilter: readCfgString(cfg, "githubRepoFilter"),
+    githubRepoMaxAgeDays: readCfgNumber(cfg, "githubRepoMaxAgeDays"),
   };
 }
 

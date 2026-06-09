@@ -95,6 +95,10 @@ export interface PluginConfig {
   maxConcurrent?: number;
   /** GitHub org name for auto-resolving repos via Linear suggestions */
   githubOrg?: string;
+  /** Substring filter for repo names (applied after archiving/age filtering) */
+  githubRepoFilter?: string;
+  /** Max age in days for repos to include (default: 365) */
+  githubRepoMaxAgeDays?: number;
 }
 
 
