@@ -1,5 +1,5 @@
 import type { OpenClawPluginApi, PluginConfig } from "../types.js";
-import { callLinear } from "../linear-client.js";
+import { callLinear, resolveViewer } from "../linear-client.js";
 import {
   COMMENT_SESSION_QUERY,
   ISSUE_SESSION_QUERY,
@@ -9,6 +9,13 @@ import { readArray, readObject, readString, sleep } from "../util.js";
 const sessionByIssueRef: Record<string, string> = {};
 const sessionByCommentRef: Record<string, string> = {};
 
+// Cached viewer (our app user) ID — resolved once, reused everywhere.
+const viewerRef: { value?: string } = {};
+
+/**
+ * Resolve a session ID from the webhook payload.
+ * Returns just the ID — ownership must be checked separately.
+ */
 export function resolveSessionId(
   data: Record<string, unknown>,
 ): string {
@@ -33,6 +40,43 @@ export function resolveSessionId(
   return readString(commentSession?.id) ?? "";
 }
 
+/**
+ * Try to extract the appUser ID from the webhook payload's nested session data.
+ * Returns "" if not available (payload may not include it).
+ */
+function resolveSessionAppUserFromPayload(
+  data: Record<string, unknown>,
+): string {
+  // Check data.agentSession.appUser.id
+  const session = readObject(data.agentSession);
+  if (session) {
+    const appUser = readObject(session.appUser);
+    const id = readString(appUser?.id) ?? "";
+    if (id) return id;
+  }
+  // Check data.agentActivity.agentSession.appUser.id
+  const activity = readObject(data.agentActivity);
+  if (activity) {
+    const actSession = readObject(activity.agentSession);
+    if (actSession) {
+      const appUser = readObject(actSession.appUser);
+      const id = readString(appUser?.id) ?? "";
+      if (id) return id;
+    }
+  }
+  // Check data.comment.agentSession.appUser.id
+  const comment = readObject(data.comment);
+  if (comment) {
+    const cmtSession = readObject(comment.agentSession);
+    if (cmtSession) {
+      const appUser = readObject(cmtSession.appUser);
+      const id = readString(appUser?.id) ?? "";
+      if (id) return id;
+    }
+  }
+  return "";
+}
+
 export function rememberSessionHint(
   data: Record<string, unknown>,
   sessionId: string,
@@ -53,6 +97,16 @@ export function rememberSessionHint(
   if (parentId) sessionByCommentRef[parentId] = sessionId;
 }
 
+async function getViewerId(
+  api: OpenClawPluginApi,
+  cfg: PluginConfig,
+): Promise<string> {
+  if (viewerRef.value) return viewerRef.value;
+  const id = await resolveViewer(api, cfg);
+  if (id) viewerRef.value = id;
+  return id;
+}
+
 export async function resolveSessionIdWithFallback(
   api: OpenClawPluginApi,
   cfg: PluginConfig,
@@ -60,11 +114,27 @@ export async function resolveSessionIdWithFallback(
 ): Promise<string> {
   const direct = resolveSessionId(data);
   if (direct) {
+    // Check ownership from the webhook payload (zero extra API calls).
+    // If the payload doesn't include appUser info, we allow through
+    // to avoid blocking legitimate events from older webhook versions.
+    const payloadAppUser = resolveSessionAppUserFromPayload(data);
+    if (payloadAppUser) {
+      const viewerId = await getViewerId(api, cfg);
+      if (viewerId && payloadAppUser !== viewerId) {
+        api.logger.info?.(
+          `linear: ignoring session ${direct.slice(0, 8)}... — appUser ${payloadAppUser.slice(0, 8)}... is not us (${viewerId.slice(0, 8)}...)`,
+        );
+        return "";
+      }
+    }
     rememberSessionHint(data, direct);
     return direct;
   }
   const kind = readString(data.type as string) ?? "";
   if (kind !== "Comment") return "";
+
+  // Resolve our viewer ID once for all fallback paths.
+  const viewerId = await getViewerId(api, cfg);
 
   const comment = readObject(data.comment);
   const issueId =
@@ -91,6 +161,7 @@ export async function resolveSessionIdWithFallback(
     api,
     cfg,
     parentId,
+    viewerId,
   );
   if (viaParent) {
     rememberSessionHint({ ...data, id: parentId }, viaParent);
@@ -100,13 +171,14 @@ export async function resolveSessionIdWithFallback(
     api,
     cfg,
     commentId,
+    viewerId,
   );
   if (viaComment) {
     rememberSessionHint({ ...data, parentId }, viaComment);
     return viaComment;
   }
   if (!issueId) return "";
-  const viaIssue = await resolveSessionFromIssue(api, cfg, issueId);
+  const viaIssue = await resolveSessionFromIssue(api, cfg, issueId, viewerId);
   if (viaIssue) rememberSessionHint(data, viaIssue);
   return viaIssue;
 }
@@ -138,11 +210,12 @@ async function resolveSessionFromCommentWithRetry(
   api: OpenClawPluginApi,
   cfg: PluginConfig,
   commentId: string,
+  viewerId?: string,
 ): Promise<string> {
   if (!commentId) return "";
   const delays = [120, 350, 800];
   for (let i = 0; i < delays.length; i += 1) {
-    const id = await resolveSessionFromComment(api, cfg, commentId);
+    const id = await resolveSessionFromComment(api, cfg, commentId, viewerId);
     if (id) return id;
     if (i < delays.length - 1) await sleep(delays[i]);
   }
@@ -153,6 +226,7 @@ async function resolveSessionFromComment(
   api: OpenClawPluginApi,
   cfg: PluginConfig,
   commentId: string,
+  viewerId?: string,
 ): Promise<string> {
   if (!commentId) return "";
   const result = await callLinear(api, cfg, "comment(agentSession)", {
@@ -162,41 +236,72 @@ async function resolveSessionFromComment(
   if (!result.ok) return "";
   const comment = readObject(result.data!.comment);
   if (!comment) return "";
-  return pickSessionIdFromComment(comment);
+  return pickSessionIdFromComment(comment, viewerId);
 }
 
+/**
+ * Pick the first session ID from a comment's session data.
+ * If viewerId is provided, only return sessions owned by that user.
+ */
 function pickSessionIdFromComment(
   comment: Record<string, unknown>,
+  viewerId?: string,
 ): string {
   const session = readObject(comment.agentSession);
   const direct = readString(session?.id);
-  if (direct) return direct;
+  if (direct) {
+    if (viewerId && !isOwnedBy(session, viewerId)) return "";
+    return direct;
+  }
   const list = readArray(
     readObject(comment.agentSessions)?.nodes,
   );
   for (const entry of list) {
-    const id = readString(readObject(entry)?.id);
-    if (id) return id;
+    const node = readObject(entry);
+    const id = readString(node?.id);
+    if (!id) continue;
+    if (viewerId && !isOwnedBy(node, viewerId)) continue;
+    return id;
   }
   const parent = readObject(comment.parent);
   if (!parent) return "";
   const parentSession = readObject(parent.agentSession);
   const parentDirect = readString(parentSession?.id);
-  if (parentDirect) return parentDirect;
+  if (parentDirect) {
+    if (viewerId && !isOwnedBy(parentSession, viewerId)) return "";
+    return parentDirect;
+  }
   const parentList = readArray(
     readObject(parent.agentSessions)?.nodes,
   );
   for (const entry of parentList) {
-    const id = readString(readObject(entry)?.id);
-    if (id) return id;
+    const node = readObject(entry);
+    const id = readString(node?.id);
+    if (!id) continue;
+    if (viewerId && !isOwnedBy(node, viewerId)) continue;
+    return id;
   }
   return "";
+}
+
+/** Check if a session node is owned by the given viewer. */
+function isOwnedBy(
+  sessionNode: Record<string, unknown> | undefined,
+  viewerId: string,
+): boolean {
+  if (!sessionNode) return false;
+  const appUser = readObject(sessionNode.appUser);
+  const appUserId = readString(appUser?.id) ?? "";
+  // If appUser is missing from the response, allow through (graceful fallback).
+  if (!appUserId) return true;
+  return appUserId === viewerId;
 }
 
 async function resolveSessionFromIssue(
   api: OpenClawPluginApi,
   cfg: PluginConfig,
   issueId: string,
+  viewerId?: string,
 ): Promise<string> {
   if (!issueId) return "";
   const result = await callLinear(api, cfg, "issue(session)", {
@@ -210,7 +315,7 @@ async function resolveSessionFromIssue(
   for (const node of nodes) {
     const comment = readObject(node);
     if (!comment) continue;
-    const sid = pickSessionIdFromComment(comment);
+    const sid = pickSessionIdFromComment(comment, viewerId);
     if (!sid) continue;
     const cid = readString(comment.id);
     const pid = readString(comment.parentId);

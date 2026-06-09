@@ -74,16 +74,16 @@ export const COMMENT_SESSION_QUERY = `
     comment(id: $id) {
       id
       parentId
-      agentSession { id }
+      agentSession { id appUser { id } }
       agentSessions(first: 3) {
-        nodes { id }
+        nodes { id appUser { id } }
       }
       parent {
         id
         parentId
-        agentSession { id }
+        agentSession { id appUser { id } }
         agentSessions(first: 3) {
-          nodes { id }
+          nodes { id appUser { id } }
         }
       }
     }
@@ -112,9 +112,9 @@ export const ISSUE_SESSION_QUERY = `
         nodes {
           id
           parentId
-          agentSession { id }
+          agentSession { id appUser { id } }
           agentSessions(first: 3) {
-            nodes { id }
+            nodes { id appUser { id } }
           }
         }
       }
