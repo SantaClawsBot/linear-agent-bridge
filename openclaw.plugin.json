@@ -146,6 +146,11 @@
       "githubRepoMaxAgeDays": {
         "type": "number",
         "description": "Maximum age in days since last push for repos to include as candidates. Archived repos and repos with no pushes are always excluded. (default: 365)"
+      },
+      "dispatchMode": {
+        "type": "string",
+        "enum": ["embedded", "channel"],
+        "description": "Dispatch mode: 'embedded' (default, runEmbeddedAgent) or 'channel' (experimental channel reply pipeline)."
       }
     }
   },
@@ -227,6 +232,10 @@
       "label": "Max repo age (days)",
       "description": "Exclude repos not pushed to within this many days (default: 365)",
       "placeholder": "365"
+    },
+    "dispatchMode": {
+      "label": "Dispatch mode",
+      "description": "Dispatch mode: 'embedded' (default, runEmbeddedAgent) or 'channel' (experimental channel reply pipeline)."
     }
   }
 }

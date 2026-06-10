@@ -42,6 +42,8 @@ export interface PluginConfig {
   githubRepoFilter?: string;
   /** Max age in days for repos to include (default: 365) */
   githubRepoMaxAgeDays?: number;
+  /** Dispatch mode: "embedded" (default, runEmbeddedAgent) or "channel" (experimental channel reply pipeline) */
+  dispatchMode?: "embedded" | "channel";
 }
 
 
