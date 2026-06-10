@@ -29,7 +29,7 @@ two‑session split + `lightContext:true` to "dodge `blocked_tool_call`" (which 
 a runtime diagnostic, not something `lightContext` — a bootstrap‑file token trim
 — addresses), and the 8 s "Working…" keepalive loop.
 
-## Already done (committed on this branch)
+## Already done (landed on `master`)
 
 - `56eeb70` — removed dead `dispatchToAgentRuntime` (internal `runtime.channel`
   plumbing) + `response-parser.ts`.
@@ -37,8 +37,13 @@ a runtime diagnostic, not something `lightContext` — a bootstrap‑file token 
   the real `import type { OpenClawPluginApi, PluginRuntime, PluginLogger } from
   "openclaw/plugin-sdk"`. Added `openclaw` as a devDependency so `tsc` resolves
   them. This immediately caught one real unsoundness (`getSessionMessages`
-  returns `{ messages: unknown[] }`, not `{role,content}`), now fixed in
-  `extractLastAssistantText`.
+  returns `{ messages: unknown[] }`, not `{role,content}`), now fixed.
+- **`a8c4f51` — Tier 1 implemented**: dispatch via
+  `api.runtime.agent.runEmbeddedAgent` (new `src/agent/embedded-run.ts`), real
+  `AbortController` cancellation, streaming → Linear activities + gated keepalive
+  backstop, `disableMessageTool:true`. Plan/exec split, `lightContext`, the scrape,
+  and the unconditional keepalive are gone. **Needs a VM smoke‑test** (see the
+  Tier 1 checklist below) — runtime behavior can't be validated off‑gateway.
 
 > Dependency note: the devDependency is heavy (~361 MB, 294 transitive pkgs;
 > gitignored, only `package.json`/lock committed). If undesirable, switch to a
@@ -121,8 +126,13 @@ const text = result.meta.finalAssistantVisibleText
 | final `payloads[].text` / `meta.finalAssistantVisibleText` | `activity/response` |
 | `payload.isError` | `activity/error` |
 
-Because the run streams progress, drop the 8 s `setInterval` "Working…" keepalive
-— real activity now flows continuously.
+Because the run streams progress, the unconditional 8 s "Working…" keepalive is
+replaced. **As implemented (`a8c4f51`)** a *gated* backstop is kept: it posts an
+ephemeral "Working…" only when nothing has streamed in the last ~8 s — covering a
+long *silent* tool call (e.g. a build) that would otherwise leave Linear with no
+activity and risk a "stopped responding" mark. Only `onReasoningStream` (→ thought)
+and `onToolResult` (→ action) are wired today; plan‑stream → `session/plan` is not
+yet (the agent can still post plans via the API proxy).
 
 ### Cancellation (fixes the "no abort on cancel" gap)
 
@@ -219,15 +229,71 @@ pipeline; the bridge keeps only Linear‑specific translation.
    fidelity, dedup.
 3. Cut over; delete the superseded webhook/dispatch/session/serializer code.
 
-### To finalize before coding Tier 2
+### Verified Tier 2 contracts (OpenClaw 2026.6.1) and the open blocker
 
-Pull the verbatim channel `.d.ts` (the grounding run captured these; re‑extract
-from `dist/plugin-sdk/channel-inbound*.d.ts` / `channel-outbound*.d.ts`):
-`ChannelTurnAdapter`, `NormalizedTurnInput`, `AssembledChannelTurn`,
-`ChannelEventDeliveryAdapter`, `ChannelDeliveryInfo`, `ReplyPayload`,
-`MessagePresentation`, and the `defineChannelPluginEntry` signature + the exact
-manifest schema (`docs/plugins/manifest.md`, a bundled webhook‑style channel like
-`google-meet`/`msteams` as the precedent).
+Grounded from the installed `dist/**/*.d.ts`. Import paths (verified against the
+package `exports` map):
+
+```ts
+import { runChannelInboundEvent } from "openclaw/plugin-sdk/channel-inbound";
+import type { ChannelInboundEventRunnerParams } from "openclaw/plugin-sdk/channel-inbound";
+import { defineChannelPluginEntry, createChatChannelPlugin, createChannelPluginBase }
+  from "openclaw/plugin-sdk/channel-core";
+import type { ChannelPlugin, OpenClawPluginApi } from "openclaw/plugin-sdk/channel-core";
+import { defineChannelMessageAdapter } from "openclaw/plugin-sdk/channel-outbound";
+```
+
+Key shapes (the raw `ChannelTurnAdapter`/`AssembledChannelTurn`/`ReplyPayload`
+names are NOT exported — type the adapter **structurally** and let
+`runChannelInboundEvent` infer; public aliases are `ChannelInboundEventRunnerParams`,
+`AssembledInboundReply`, `PreparedInboundReply`, `InboundReplyDispatchResult`):
+
+```ts
+ChannelTurnAdapter<TRaw> = {
+  ingest: (raw) => NormalizedTurnInput | null | Promise<…>;          // null => drop
+  classify?; preflight?;                                              // optional
+  resolveTurn: (input, eventClass, preflight) => ChannelTurnResolved; // required
+  onFinalize?;
+}
+NormalizedTurnInput = { id; rawText; textForAgent?; textForCommands?; timestamp?; raw? }
+// resolveTurn returns EITHER a full AssembledChannelTurn { cfg, channel, agentId,
+// routeSessionKey, storePath, ctxPayload, recordInboundSession,
+// dispatchReplyWithBufferedBlockDispatcher, delivery } OR a PreparedChannelTurn
+// { routeSessionKey, storePath, ctxPayload, recordInboundSession, runDispatch() }.
+ChannelEventDeliveryAdapter = {
+  deliver: (payload: ReplyPayload, info: { kind }) => Promise<ChannelDeliveryResult | void>;
+  preparePayload?; durable?; onDelivered?; onError?;
+}
+```
+
+Wiring (per `sdk-channel-plugins.md` / `sdk-channel-inbound.md`): in `registerFull(api)`
+call `api.registerHttpRoute({ path, auth: "plugin", match: "exact", handler })`,
+**verify the Linear HMAC yourself** (auth:"plugin" routes get no gateway scopes),
+respond 202, then `await runChannelInboundEvent({ channel: "linear", accountId,
+raw: event, adapter })`. Manifest is **two files**: `package.json` →
+`{ openclaw: { extensions, setupEntry, channel: { id, label, blurb } } }` and
+`openclaw.plugin.json` → `{ kind: "channel", channels: ["linear"], configSchema,
+channelConfigs: { linear: { schema, uiHints } } }`. Entry:
+`export default defineChannelPluginEntry({ id, name, plugin, registerFull })` where
+`plugin = createChatChannelPlugin({ base: createChannelPluginBase({ id, setup }) })`.
+Avoid the deprecated `createChannelTurnReplyPipeline` / `recordInboundSessionAndDispatchReply`
+/ `runtime.channel.turn.*` names.
+
+**Open blocker (why this isn't scaffolded yet).** `resolveTurn` needs an
+`AssembledChannelTurn` whose `ctxPayload` (FinalizedMsgContext),
+`recordInboundSession`, and `dispatchReplyWithBufferedBlockDispatcher` are produced
+by `buildChannelInboundEventContext(...)` — whose exact param type
+(`BuildChannelInboundEventContextParams`) is a large facts/context shape that
+wasn't fully expanded, and **no concrete channel‑plugin source ships in the npm
+package** to copy (the real references live in separate plugin packages, e.g. MS
+Teams / Google Chat, or the `github.com/openclaw/openclaw` monorepo `src/`).
+Building this from reconstructed wiring alone, with no reference and no gateway to
+run it, would reproduce the `api.subagent`‑style guess‑and‑break failure. So Tier 2
+should be built **against a real channel‑plugin reference + iterated on the VM**,
+not blind. Concrete unblock: pull a real channel implementation
+(`createChatChannelPlugin` + `runChannelInboundEvent`) from the openclaw repo `src/`
+or a bundled channel package, ground `BuildChannelInboundEventContextParams`, then
+scaffold `src/channel/linear-channel.ts` behind a default‑off config flag.
 
 ---
 
