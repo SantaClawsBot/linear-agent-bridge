@@ -52,8 +52,9 @@ import { shouldSkipPromptedRun, isSelfAuthoredComment } from "./skip-filter.js";
 import { createSessionToken, revokeSessionToken } from "../agent/session-token.js";
 import { buildEnrichedMessage } from "../agent/context-builder.js";
 import { cleanupSession } from "../agent/plan-manager.js";
-import { hasPostedResponse, clearResponseFlag } from "../agent/response-tracker.js";
+import { hasPostedResponse, clearResponseFlag, markResponsePosted } from "../agent/response-tracker.js";
 import { runEmbeddedLinearAgent } from "../agent/embedded-run.js";
+import { dispatchViaChannelPipeline } from "../agent/channel-dispatch.js";
 import { captureBaseUrl } from "../api/base-url.js";
 import { resolveTraceId, tracePrefix } from "./trace.js";
 import {
@@ -663,35 +664,76 @@ async function handleAgentEvent(
       }, 8_000);
       keepalive.unref?.();
 
-      api.logger.info?.(`${prefix}linear: dispatching via runEmbeddedAgent, sessionId=linear:${session}`);
-      try {
-        const runResult = await runEmbeddedLinearAgent(api, {
-          sessionId: `linear:${session}`,
-          prompt: message,
-          repoDir: repo,
-          agentId: agent,
-          abortSignal: abortController.signal,
-          onThought: (t) => {
-            bumpActivity();
-            if (t) {
+      if (cfg.dispatchMode === "channel") {
+        // ── Experimental: dispatch via the OpenClaw channel reply pipeline ──
+        // (flag-gated). The delivery adapter posts Linear activities directly,
+        // so we leave agentText undefined; the hasPostedResponse(session) check
+        // below then skips the auto-post.
+        api.logger.info?.(`${prefix}linear: dispatching via channel reply pipeline, sessionKey=${sessionKey}`);
+        try {
+          const result = await dispatchViaChannelPipeline(api, {
+            session,
+            sessionKey,
+            agentId: agent,
+            message,
+            label,
+            abortSignal: abortController.signal,
+            postThought: (t) => {
+              bumpActivity();
               postActivityFireAndForget(api, cfg, trace, session, { type: "thought", body: t }, { ephemeral: true });
-            }
-          },
-          onAction: (a) => {
-            bumpActivity();
-            postActivityFireAndForget(api, cfg, trace, session, {
-              type: "action",
-              action: a.action ?? "working",
-              result: a.result,
-            });
-          },
-        });
-        // runResult.aborted is handled by the canceled-run short-circuit below.
-        agentText = runResult.text;
-        agentError = runResult.error;
-        api.logger.info?.(`${prefix}linear: runEmbeddedAgent completed, textLen=${agentText?.length ?? 0}, aborted=${runResult.aborted}, error=${Boolean(agentError)}`);
-      } finally {
-        clearInterval(keepalive);
+            },
+            postAction: (a) => {
+              bumpActivity();
+              postActivityFireAndForget(api, cfg, trace, session, {
+                type: "action",
+                action: a.action ?? "working",
+                result: a.result,
+              });
+            },
+            postResponse: (t) => {
+              bumpActivity();
+              postActivityFireAndForget(api, cfg, trace, session, { type: "response", body: t });
+              markResponsePosted(session);
+            },
+            postError: (t) =>
+              postActivityFireAndForget(api, cfg, trace, session, { type: "error", body: t }),
+          });
+          agentError = result.error;
+          api.logger.info?.(`${prefix}linear: channel reply pipeline completed, responded=${result.responded}, error=${Boolean(agentError)}`);
+        } finally {
+          clearInterval(keepalive);
+        }
+      } else {
+        api.logger.info?.(`${prefix}linear: dispatching via runEmbeddedAgent, sessionId=linear:${session}`);
+        try {
+          const runResult = await runEmbeddedLinearAgent(api, {
+            sessionId: `linear:${session}`,
+            prompt: message,
+            repoDir: repo,
+            agentId: agent,
+            abortSignal: abortController.signal,
+            onThought: (t) => {
+              bumpActivity();
+              if (t) {
+                postActivityFireAndForget(api, cfg, trace, session, { type: "thought", body: t }, { ephemeral: true });
+              }
+            },
+            onAction: (a) => {
+              bumpActivity();
+              postActivityFireAndForget(api, cfg, trace, session, {
+                type: "action",
+                action: a.action ?? "working",
+                result: a.result,
+              });
+            },
+          });
+          // runResult.aborted is handled by the canceled-run short-circuit below.
+          agentText = runResult.text;
+          agentError = runResult.error;
+          api.logger.info?.(`${prefix}linear: runEmbeddedAgent completed, textLen=${agentText?.length ?? 0}, aborted=${runResult.aborted}, error=${Boolean(agentError)}`);
+        } finally {
+          clearInterval(keepalive);
+        }
       }
     }
 

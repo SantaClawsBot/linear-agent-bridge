@@ -32,7 +32,16 @@ export function normalizeCfg(
     githubOrg: readCfgString(cfg, "githubOrg"),
     githubRepoFilter: readCfgString(cfg, "githubRepoFilter"),
     githubRepoMaxAgeDays: readCfgNumber(cfg, "githubRepoMaxAgeDays"),
+    dispatchMode: readCfgDispatchMode(cfg),
   };
+}
+
+function readCfgDispatchMode(
+  cfg: Record<string, unknown>,
+): "embedded" | "channel" | undefined {
+  const raw = cfg.dispatchMode;
+  if (raw === "embedded" || raw === "channel") return raw;
+  return undefined;
 }
 
 function readCfgString(
